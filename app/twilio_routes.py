@@ -3,6 +3,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import Response
 from twilio.twiml.voice_response import VoiceResponse
 
+from .config import APP_BASE_URL
 from .conversation import (
     get_state,
     update_state,
@@ -14,6 +15,9 @@ from .llm import llm_classify_appliance, llm_extract_symptoms
 from .scheduling import find_available_slots, book_appointment, format_slot_for_speech
 
 router = APIRouter()
+
+# Absolute URL for Twilio webhooks
+VOICE_CONTINUE_URL = f"{APP_BASE_URL}/twilio/voice/continue"
 
 
 @router.post("/voice")
@@ -43,7 +47,7 @@ async def voice_entry(request: Request):
         input="speech",
         timeout=5,
         speech_timeout="3",
-        action="/twilio/voice/continue",
+        action=VOICE_CONTINUE_URL,
         method="POST"
     )
     gather.say(
@@ -51,7 +55,7 @@ async def voice_entry(request: Request):
         "For example, a washer, dryer, or refrigerator."
     )
     
-    response.redirect("/twilio/voice/continue")
+    response.redirect(VOICE_CONTINUE_URL)
     
     twiml_string = str(response)
     return Response(content=twiml_string, media_type="application/xml")
@@ -81,14 +85,14 @@ async def voice_continue(request: Request):
                 input="speech",
                 timeout=5,
                 speech_timeout="3",
-                action="/twilio/voice/continue",
+                action=VOICE_CONTINUE_URL,
                 method="POST"
             )
             gather.say(
                 "I'm sorry, I didn't hear anything. "
                 "Please say that again after the beep."
             )
-            response.redirect("/twilio/voice/continue")
+            response.redirect(VOICE_CONTINUE_URL)
         else:
             response.say(
                 "I'm still not hearing anything clearly, "
@@ -121,14 +125,14 @@ async def voice_continue(request: Request):
                 input="speech",
                 timeout=5,
                 speech_timeout="3",
-                action="/twilio/voice/continue",
+                action=VOICE_CONTINUE_URL,
                 method="POST"
             )
             gather.say(
                 f"Thanks. I heard {appliance}. "
                 f"Now, can you briefly describe what's going wrong with your {appliance}?"
             )
-            response.redirect("/twilio/voice/continue")
+            response.redirect(VOICE_CONTINUE_URL)
         else:
             state["no_match_attempts"] = state.get("no_match_attempts", 0) + 1
             update_state(call_sid, state)
@@ -138,14 +142,14 @@ async def voice_continue(request: Request):
                     input="speech",
                     timeout=5,
                     speech_timeout="3",
-                    action="/twilio/voice/continue",
+                    action=VOICE_CONTINUE_URL,
                     method="POST"
                 )
                 gather.say(
                     "I'm sorry, I didn't catch what appliance you're calling about. "
                     "Please say something like washer, dryer, refrigerator, dishwasher, oven, or HVAC system."
                 )
-                response.redirect("/twilio/voice/continue")
+                response.redirect(VOICE_CONTINUE_URL)
             else:
                 response.say(
                     "I'm still having trouble understanding the appliance type, "
@@ -179,7 +183,7 @@ async def voice_continue(request: Request):
                 input="speech",
                 timeout=5,
                 speech_timeout="3",
-                action="/twilio/voice/continue",
+                action=VOICE_CONTINUE_URL,
                 method="POST"
             )
             # Use the LLM-generated symptom summary in the response
@@ -189,7 +193,7 @@ async def voice_continue(request: Request):
                 f"Let's try a quick check together. {prompt} "
                 "After you've checked that, just say 'yes' if it helped or 'no' if the problem is still there."
             )
-            response.redirect("/twilio/voice/continue")
+            response.redirect(VOICE_CONTINUE_URL)
         else:
             state["step"] = "done"
             update_state(call_sid, state)
@@ -222,14 +226,14 @@ async def voice_continue(request: Request):
                     input="speech",
                     timeout=5,
                     speech_timeout="3",
-                    action="/twilio/voice/continue",
+                    action=VOICE_CONTINUE_URL,
                     method="POST"
                 )
                 gather.say(
                     f"Okay, let's try another check. {prompt} "
                     "After you've checked that, just say 'yes' if it helped or 'no' if the problem is still there."
                 )
-                response.redirect("/twilio/voice/continue")
+                response.redirect(VOICE_CONTINUE_URL)
             else:
                 # Escalate to scheduling
                 state["step"] = "collect_zip"
@@ -241,7 +245,7 @@ async def voice_continue(request: Request):
                     input="speech",
                     timeout=5,
                     speech_timeout="3",
-                    action="/twilio/voice/continue",
+                    action=VOICE_CONTINUE_URL,
                     method="POST"
                 )
                 gather.say(
@@ -249,7 +253,7 @@ async def voice_continue(request: Request):
                     "Let me help you schedule an appointment. "
                     "What is your ZIP code?"
                 )
-                response.redirect("/twilio/voice/continue")
+                response.redirect(VOICE_CONTINUE_URL)
     
     elif current_step == "collect_zip":
         # Extract ZIP code from speech (5 digits)
@@ -266,27 +270,27 @@ async def voice_continue(request: Request):
                 input="speech",
                 timeout=5,
                 speech_timeout="3",
-                action="/twilio/voice/continue",
+                action=VOICE_CONTINUE_URL,
                 method="POST"
             )
             gather.say(
                 f"Got it, ZIP code {' '.join(zip_code)}. "
                 "Do you prefer a morning or afternoon appointment?"
             )
-            response.redirect("/twilio/voice/continue")
+            response.redirect(VOICE_CONTINUE_URL)
         else:
             gather = response.gather(
                 input="speech",
                 timeout=5,
                 speech_timeout="3",
-                action="/twilio/voice/continue",
+                action=VOICE_CONTINUE_URL,
                 method="POST"
             )
             gather.say(
                 "I'm sorry, I didn't catch a valid ZIP code. "
                 "Please say your 5-digit ZIP code."
             )
-            response.redirect("/twilio/voice/continue")
+            response.redirect(VOICE_CONTINUE_URL)
     
     elif current_step == "collect_time_pref":
         text_lower = speech_result.lower()
@@ -334,14 +338,14 @@ async def voice_continue(request: Request):
                 input="speech",
                 timeout=5,
                 speech_timeout="3",
-                action="/twilio/voice/continue",
+                action=VOICE_CONTINUE_URL,
                 method="POST"
             )
             gather.say(
                 slot_speech +
                 "Please say option 1, option 2, or option 3 to select your preferred time."
             )
-            response.redirect("/twilio/voice/continue")
+            response.redirect(VOICE_CONTINUE_URL)
     
     elif current_step == "choose_slot":
         text_lower = speech_result.lower()
@@ -416,14 +420,14 @@ async def voice_continue(request: Request):
                 input="speech",
                 timeout=5,
                 speech_timeout="3",
-                action="/twilio/voice/continue",
+                action=VOICE_CONTINUE_URL,
                 method="POST"
             )
             gather.say(
                 "I'm sorry, I didn't understand your selection. "
                 "Please say option 1, option 2, or option 3."
             )
-            response.redirect("/twilio/voice/continue")
+            response.redirect(VOICE_CONTINUE_URL)
     
     else:
         response.say("I'm sorry, something went wrong. Please call back later. Goodbye.")
