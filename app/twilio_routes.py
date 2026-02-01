@@ -13,11 +13,59 @@ from .conversation import (
 )
 from .llm import llm_classify_appliance, llm_extract_symptoms
 from .scheduling import find_available_slots, book_appointment, format_slot_for_speech
+from .image_service import (
+    create_image_upload_token,
+    build_upload_url,
+    send_upload_email,
+    validate_email
+)
 
 router = APIRouter()
 
 # Absolute URL for Twilio webhooks
 VOICE_CONTINUE_URL = f"{APP_BASE_URL}/twilio/voice/continue"
+
+
+def extract_email_from_speech(speech_text: str) -> str:
+    """
+    Extract email address from speech-to-text result.
+    Handles common speech patterns like "john dot smith at gmail dot com"
+    """
+    text = speech_text.lower().strip()
+    
+    # Replace common speech patterns
+    replacements = [
+        (" at ", "@"),
+        (" dot ", "."),
+        (" underscore ", "_"),
+        (" dash ", "-"),
+        (" hyphen ", "-"),
+        ("at symbol", "@"),
+        ("dot com", ".com"),
+        ("dot net", ".net"),
+        ("dot org", ".org"),
+        ("dot edu", ".edu"),
+        ("dot co", ".co"),
+        ("gmail.com", "gmail.com"),
+        ("yahoo.com", "yahoo.com"),
+        ("hotmail.com", "hotmail.com"),
+        ("outlook.com", "outlook.com"),
+    ]
+    
+    for old, new in replacements:
+        text = text.replace(old, new)
+    
+    # Remove spaces
+    text = text.replace(" ", "")
+    
+    # Try to find an email pattern
+    email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+    match = re.search(email_pattern, text)
+    
+    if match:
+        return match.group(0)
+    
+    return text
 
 
 @router.post("/voice")
@@ -235,11 +283,11 @@ async def voice_continue(request: Request):
                 )
                 response.redirect(VOICE_CONTINUE_URL)
             else:
-                # Escalate to scheduling
-                state["step"] = "collect_zip"
+                # Offer Tier 3 image upload option before scheduling
+                state["step"] = "offer_image_upload"
                 update_state(call_sid, state)
                 
-                print(f"[Escalation Needed] CallSid: {call_sid} - Starting scheduling flow")
+                print(f"[Escalation Needed] CallSid: {call_sid} - Offering Tier 3 image upload")
                 
                 gather = response.gather(
                     input="speech",
@@ -249,11 +297,186 @@ async def voice_continue(request: Request):
                     method="POST"
                 )
                 gather.say(
-                    "It sounds like this may need a technician visit. "
-                    "Let me help you schedule an appointment. "
+                    "I wasn't able to resolve the issue with basic troubleshooting. "
+                    "I have two options for you. "
+                    "First, I can send you a link to upload a photo of your appliance "
+                    "for additional AI-powered diagnosis. "
+                    "Or second, I can help you schedule a technician visit. "
+                    "Would you like to upload a photo, or schedule a technician?"
+                )
+                response.redirect(VOICE_CONTINUE_URL)
+    
+    elif current_step == "offer_image_upload":
+        text_lower = speech_result.lower()
+        
+        if "photo" in text_lower or "picture" in text_lower or "image" in text_lower or "upload" in text_lower:
+            # User wants Tier 3 image upload
+            state["step"] = "collect_email"
+            update_state(call_sid, state)
+            
+            print(f"[Tier 3] CallSid: {call_sid} - User chose image upload")
+            
+            gather = response.gather(
+                input="speech",
+                timeout=5,
+                speech_timeout="3",
+                action=VOICE_CONTINUE_URL,
+                method="POST"
+            )
+            gather.say(
+                "Great! I'll send you an upload link by email. "
+                "Please say your email address slowly and clearly."
+            )
+            response.redirect(VOICE_CONTINUE_URL)
+        
+        elif "technician" in text_lower or "schedule" in text_lower or "appointment" in text_lower or "visit" in text_lower:
+            # User wants Tier 2 scheduling
+            state["step"] = "collect_zip"
+            update_state(call_sid, state)
+            
+            print(f"[Tier 2] CallSid: {call_sid} - User chose technician scheduling")
+            
+            gather = response.gather(
+                input="speech",
+                timeout=5,
+                speech_timeout="3",
+                action=VOICE_CONTINUE_URL,
+                method="POST"
+            )
+            gather.say(
+                "Let me help you schedule a technician visit. "
+                "What is your ZIP code?"
+            )
+            response.redirect(VOICE_CONTINUE_URL)
+        
+        else:
+            # Unclear response, ask again
+            gather = response.gather(
+                input="speech",
+                timeout=5,
+                speech_timeout="3",
+                action=VOICE_CONTINUE_URL,
+                method="POST"
+            )
+            gather.say(
+                "I'm sorry, I didn't catch that. "
+                "Would you like to upload a photo for diagnosis, "
+                "or schedule a technician visit?"
+            )
+            response.redirect(VOICE_CONTINUE_URL)
+    
+    elif current_step == "collect_email":
+        # Extract email from speech
+        email = extract_email_from_speech(speech_result)
+        
+        if email and validate_email(email):
+            state["customer_email"] = email
+            state["email_attempts"] = 0
+            
+            # Create upload token and send email
+            upload_token = create_image_upload_token(
+                call_sid=call_sid,
+                email=email,
+                appliance_type=state.get("appliance_type"),
+                symptom_summary=state.get("symptom_summary")
+            )
+            
+            upload_url = build_upload_url(upload_token.token)
+            send_upload_email(email, upload_url, state.get("appliance_type"))
+            
+            state["image_upload_sent"] = True
+            state["upload_token"] = upload_token.token
+            state["step"] = "after_email_sent"
+            update_state(call_sid, state)
+            
+            print(f"[Tier 3] CallSid: {call_sid} - Upload link sent to {email}")
+            
+            gather = response.gather(
+                input="speech",
+                timeout=5,
+                speech_timeout="3",
+                action=VOICE_CONTINUE_URL,
+                method="POST"
+            )
+            gather.say(
+                f"I've sent an upload link to {email}. "
+                "Please check your inbox and upload a clear photo of your appliance. "
+                "Our AI will analyze it and provide additional troubleshooting tips. "
+                "Would you also like to schedule a technician visit as a backup, "
+                "or is the email enough for now?"
+            )
+            response.redirect(VOICE_CONTINUE_URL)
+        
+        else:
+            state["email_attempts"] = state.get("email_attempts", 0) + 1
+            update_state(call_sid, state)
+            
+            if state["email_attempts"] <= 2:
+                gather = response.gather(
+                    input="speech",
+                    timeout=5,
+                    speech_timeout="3",
+                    action=VOICE_CONTINUE_URL,
+                    method="POST"
+                )
+                gather.say(
+                    "I'm sorry, I didn't catch a valid email address. "
+                    "Please say your email slowly, spelling out any unusual parts. "
+                    "For example, john dot smith at gmail dot com."
+                )
+                response.redirect(VOICE_CONTINUE_URL)
+            else:
+                # Too many failed attempts, fall back to scheduling
+                state["step"] = "collect_zip"
+                update_state(call_sid, state)
+                
+                gather = response.gather(
+                    input="speech",
+                    timeout=5,
+                    speech_timeout="3",
+                    action=VOICE_CONTINUE_URL,
+                    method="POST"
+                )
+                gather.say(
+                    "I'm having trouble with the email. "
+                    "Let's schedule a technician visit instead. "
                     "What is your ZIP code?"
                 )
                 response.redirect(VOICE_CONTINUE_URL)
+    
+    elif current_step == "after_email_sent":
+        text_lower = speech_result.lower()
+        
+        if "schedule" in text_lower or "technician" in text_lower or "yes" in text_lower or "backup" in text_lower:
+            # User wants scheduling as backup
+            state["step"] = "collect_zip"
+            update_state(call_sid, state)
+            
+            gather = response.gather(
+                input="speech",
+                timeout=5,
+                speech_timeout="3",
+                action=VOICE_CONTINUE_URL,
+                method="POST"
+            )
+            gather.say(
+                "Let me schedule a technician as well. "
+                "What is your ZIP code?"
+            )
+            response.redirect(VOICE_CONTINUE_URL)
+        
+        else:
+            # User is satisfied with just the email
+            state["step"] = "done"
+            update_state(call_sid, state)
+            
+            response.say(
+                "You're all set! Check your email for the upload link. "
+                "After you upload a photo, our system will analyze it and provide tips. "
+                "If you need further assistance, you can always call back. "
+                "Thank you for calling Sears Home Services. Goodbye."
+            )
+            response.hangup()
     
     elif current_step == "collect_zip":
         # Extract ZIP code from speech (5 digits)

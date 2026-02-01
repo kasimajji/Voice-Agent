@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text
 from sqlalchemy.orm import relationship
 from .db import Base
 
@@ -57,3 +57,21 @@ class Appointment(Base):
     technician_id = Column(Integer, ForeignKey("technicians.id"))
     start_time = Column(DateTime)
     end_time = Column(DateTime)
+
+
+class ImageUploadToken(Base):
+    """Tier 3: Image upload tokens for vision-based diagnosis."""
+    __tablename__ = "image_upload_tokens"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    token = Column(String(64), unique=True, index=True, nullable=False)
+    call_sid = Column(String(100), index=True, nullable=False)
+    email = Column(String(255), nullable=False)
+    appliance_type = Column(String(100), nullable=True)
+    symptom_summary = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime, nullable=True)
+    image_url = Column(String(500), nullable=True)
+    analysis_summary = Column(Text, nullable=True)
+    troubleshooting_tips = Column(Text, nullable=True)

@@ -1,0 +1,208 @@
+"""
+Tier 3: Image Upload Service
+Token creation, URL building, and email sending for vision-based diagnosis.
+"""
+import os
+import uuid
+import re
+from datetime import datetime, timedelta
+from typing import Optional
+
+from .config import APP_BASE_URL
+from .db import SessionLocal
+from .models import ImageUploadToken
+
+
+def generate_upload_token() -> str:
+    """Generate a secure random token for image uploads."""
+    return uuid.uuid4().hex
+
+
+def build_upload_url(token: str) -> str:
+    """Build the full upload URL using APP_BASE_URL."""
+    return f"{APP_BASE_URL}/upload/{token}"
+
+
+def create_image_upload_token(
+    call_sid: str,
+    email: str,
+    appliance_type: Optional[str] = None,
+    symptom_summary: Optional[str] = None,
+    expiration_hours: int = 24
+) -> ImageUploadToken:
+    """
+    Create and persist an image upload token.
+    
+    Args:
+        call_sid: The Twilio call SID
+        email: Customer's email address
+        appliance_type: Type of appliance (from call)
+        symptom_summary: Summary of symptoms (from call)
+        expiration_hours: Hours until token expires (default 24)
+    
+    Returns:
+        The created ImageUploadToken record
+    """
+    token = generate_upload_token()
+    now = datetime.utcnow()
+    expires_at = now + timedelta(hours=expiration_hours)
+    
+    db = SessionLocal()
+    try:
+        upload_token = ImageUploadToken(
+            token=token,
+            call_sid=call_sid,
+            email=email,
+            appliance_type=appliance_type,
+            symptom_summary=symptom_summary,
+            created_at=now,
+            expires_at=expires_at
+        )
+        db.add(upload_token)
+        db.commit()
+        db.refresh(upload_token)
+        
+        print(f"[Tier 3] Created upload token for CallSid: {call_sid}, Email: {email}")
+        return upload_token
+    finally:
+        db.close()
+
+
+def get_upload_token(token: str) -> Optional[ImageUploadToken]:
+    """Retrieve an upload token by its token string."""
+    db = SessionLocal()
+    try:
+        return db.query(ImageUploadToken).filter(
+            ImageUploadToken.token == token
+        ).first()
+    finally:
+        db.close()
+
+
+def is_token_valid(upload_token: ImageUploadToken) -> bool:
+    """Check if a token is valid (not expired and not used)."""
+    if upload_token is None:
+        return False
+    now = datetime.utcnow()
+    return upload_token.expires_at > now and upload_token.used_at is None
+
+
+def mark_token_used(token: str, image_url: str) -> Optional[ImageUploadToken]:
+    """Mark a token as used and store the image URL."""
+    db = SessionLocal()
+    try:
+        upload_token = db.query(ImageUploadToken).filter(
+            ImageUploadToken.token == token
+        ).first()
+        
+        if upload_token:
+            upload_token.used_at = datetime.utcnow()
+            upload_token.image_url = image_url
+            db.commit()
+            db.refresh(upload_token)
+        
+        return upload_token
+    finally:
+        db.close()
+
+
+def update_token_analysis(
+    token: str,
+    analysis_summary: str,
+    troubleshooting_tips: str
+) -> Optional[ImageUploadToken]:
+    """Update the token with vision analysis results."""
+    db = SessionLocal()
+    try:
+        upload_token = db.query(ImageUploadToken).filter(
+            ImageUploadToken.token == token
+        ).first()
+        
+        if upload_token:
+            upload_token.analysis_summary = analysis_summary
+            upload_token.troubleshooting_tips = troubleshooting_tips
+            db.commit()
+            db.refresh(upload_token)
+        
+        return upload_token
+    finally:
+        db.close()
+
+
+def validate_email(email: str) -> bool:
+    """Basic email validation using regex."""
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(pattern, email.strip()))
+
+
+def send_upload_email(email: str, upload_url: str, appliance_type: Optional[str] = None) -> bool:
+    """
+    Send an email with the image upload link.
+    
+    In dev mode (no SENDGRID_API_KEY), logs to console instead.
+    
+    Args:
+        email: Recipient email address
+        upload_url: The full upload URL
+        appliance_type: Optional appliance type for personalization
+    
+    Returns:
+        True if email was sent (or logged), False on error
+    """
+    sendgrid_key = os.getenv("SENDGRID_API_KEY")
+    
+    appliance_text = f" for your {appliance_type}" if appliance_type else ""
+    
+    subject = "Sears Home Services - Upload Photo for Diagnosis"
+    body = f"""Hello,
+
+Thank you for calling Sears Home Services. To help us better diagnose the issue{appliance_text}, please upload a photo of your appliance showing the problem area.
+
+Click the link below to upload your photo:
+{upload_url}
+
+This link will expire in 24 hours.
+
+Tips for a helpful photo:
+- Show any error codes or warning lights on the display
+- Capture any visible damage, leaks, or frost buildup
+- Include the model number label if possible
+
+After you upload, our system will analyze the image and provide additional troubleshooting suggestions.
+
+Thank you,
+Sears Home Services Team
+"""
+    
+    if not sendgrid_key:
+        print("\n" + "=" * 60)
+        print("[DEV MODE] Email would be sent:")
+        print(f"To: {email}")
+        print(f"Subject: {subject}")
+        print("-" * 60)
+        print(body)
+        print("=" * 60 + "\n")
+        return True
+    
+    try:
+        from sendgrid import SendGridAPIClient
+        from sendgrid.helpers.mail import Mail
+        
+        message = Mail(
+            from_email=os.getenv("SENDGRID_FROM_EMAIL", "noreply@searshomeservices.com"),
+            to_emails=email,
+            subject=subject,
+            plain_text_content=body
+        )
+        
+        sg = SendGridAPIClient(sendgrid_key)
+        response = sg.send(message)
+        
+        print(f"[Tier 3] Email sent to {email}, status: {response.status_code}")
+        return response.status_code in [200, 201, 202]
+        
+    except Exception as e:
+        print(f"[Tier 3] Email error: {e}")
+        print(f"[Tier 3] Falling back to console output for: {email}")
+        print(f"[Tier 3] Upload URL: {upload_url}")
+        return True

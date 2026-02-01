@@ -47,3 +47,6 @@ Thumbs.db
 # Database
 *.db
 *.sqlite3
+
+# Uploaded images (Tier 3)
+uploads/
