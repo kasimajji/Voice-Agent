@@ -1,27 +1,25 @@
 import os
-from urllib.parse import quote_plus
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
-from dotenv import load_dotenv
 
-load_dotenv()
+# Get DATABASE_URL from environment, default to SQLite
+_env_url = os.getenv("DATABASE_URL", "")
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL is not set. Please configure it in .env")
+# Ignore Azure SQL / ODBC connection strings - use SQLite instead
+if not _env_url or "ODBC" in _env_url or "Driver=" in _env_url or "mssql" in _env_url:
+    DATABASE_URL = "sqlite:///./voice_ai.db"
+    print("[DB] Using local SQLite database: voice_ai.db")
+else:
+    DATABASE_URL = _env_url
 
-# Check if it's an ODBC connection string (Azure SQL format) and convert to SQLAlchemy URL
-if DATABASE_URL.startswith("Driver=") or DATABASE_URL.startswith("{") or "ODBC Driver" in DATABASE_URL:
-    # Azure SQL with ODBC - construct proper SQLAlchemy URL
-    # Format: mssql+pyodbc:///?odbc_connect=<encoded_connection_string>
-    encoded_conn = quote_plus(DATABASE_URL)
-    DATABASE_URL = f"mssql+pyodbc:///?odbc_connect={encoded_conn}"
+# SQLite requires check_same_thread=False for FastAPI compatibility
+connect_args = {}
+if DATABASE_URL.startswith("sqlite"):
+    connect_args["check_same_thread"] = False
 
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
+    connect_args=connect_args,
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

@@ -5,5 +5,3 @@ python-multipart
 twilio
 google-generativeai
 sqlalchemy
-psycopg2-binary
-pyodbc
