@@ -23,10 +23,17 @@ def get_state(call_id: str) -> dict:
         "appointment_id": None,
         "no_input_attempts": 0,
         "no_match_attempts": 0,
+        # Email capture with confirmation loop (Issue 1)
         "customer_email": None,
+        "pending_email": None,  # Email awaiting confirmation
         "email_attempts": 0,
+        "email_confirm_attempts": 0,
+        # Image upload flow (Issue 2)
         "image_upload_sent": False,
-        "upload_token": None
+        "upload_token": None,
+        "waiting_for_upload": False,
+        "upload_poll_count": 0,
+        "image_analysis_spoken": False
     }
     sessions[call_id] = initial_state
     return initial_state

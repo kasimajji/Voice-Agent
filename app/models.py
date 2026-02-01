@@ -75,3 +75,5 @@ class ImageUploadToken(Base):
     image_url = Column(String(500), nullable=True)
     analysis_summary = Column(Text, nullable=True)
     troubleshooting_tips = Column(Text, nullable=True)
+    # New field: Track if uploaded image is actually an appliance
+    is_appliance_image = Column(Boolean, nullable=True, default=None)

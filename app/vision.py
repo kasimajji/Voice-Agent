@@ -1,6 +1,8 @@
 """
 Tier 3: Gemini Vision Analysis
 Analyze appliance images using Gemini multimodal model.
+
+ISSUE 2: Enhanced to detect if image actually shows an appliance.
 """
 import json
 import base64
@@ -26,7 +28,8 @@ def analyze_image_with_gemini(
     Returns:
         {
             "summary": "Description of what was found in the image",
-            "troubleshooting": "Step-by-step troubleshooting suggestions"
+            "troubleshooting": "Step-by-step troubleshooting suggestions",
+            "is_appliance_image": True/False - whether image shows the expected appliance
         }
     """
     if not GEMINI_API_KEY:
@@ -53,29 +56,37 @@ def analyze_image_with_gemini(
         
         context = "\n".join(context_parts) if context_parts else "No additional context provided."
         
+        # ISSUE 2: Updated prompt to detect if image actually shows an appliance
         prompt = f"""You are an expert appliance repair technician analyzing an image sent by a customer.
 
 Context from the customer's call:
 {context}
 
-Analyze this image and provide:
+FIRST, determine if this image actually shows the appliance mentioned above (or any home appliance if none specified).
 
-1. **SUMMARY**: Describe what you observe in the image that is relevant to diagnosing the appliance issue. Look for:
+Then analyze this image and provide:
+
+1. **IS_APPLIANCE_IMAGE**: true if this image shows a home appliance (washer, dryer, refrigerator, dishwasher, oven, HVAC, etc.), false if it shows something unrelated (person, pet, random object, blank, etc.)
+
+2. **SUMMARY**: Describe what you observe in the image that is relevant to diagnosing the appliance issue. Look for:
    - Error codes or warning lights on displays
    - Visible damage, rust, or wear
    - Leaks, frost buildup, or condensation
    - Unusual positioning of parts
    - Model/serial number if visible
+   If the image does NOT show an appliance, describe what you see instead.
 
-2. **TROUBLESHOOTING**: Provide 2-4 safe troubleshooting steps the customer can try at home. Be specific and practical. If the issue appears serious or requires professional repair, clearly state that.
+3. **TROUBLESHOOTING**: Provide 2-4 safe troubleshooting steps the customer can try at home. Be specific and practical. If the issue appears serious or requires professional repair, clearly state that.
+   If the image does NOT show an appliance, leave this empty.
 
 Format your response as JSON:
 {{
+    "is_appliance_image": true or false,
     "summary": "Your detailed observations here",
     "troubleshooting": "Step 1: ...\\nStep 2: ...\\nStep 3: ..."
 }}
 
-If you cannot identify relevant diagnostic information from the image, still provide general guidance based on the context provided."""
+Be strict about is_appliance_image - only set to true if you can clearly see a home appliance in the image."""
 
         model = genai.GenerativeModel(GEMINI_MODEL)
         
@@ -128,7 +139,10 @@ def parse_vision_response(
     appliance_type: Optional[str],
     symptom_summary: Optional[str]
 ) -> Dict[str, Any]:
-    """Parse the Gemini response, handling JSON or plain text."""
+    """Parse the Gemini response, handling JSON or plain text.
+    
+    ISSUE 2: Now includes is_appliance_image field.
+    """
     try:
         cleaned = response_text.strip()
         if cleaned.startswith("```json"):
@@ -140,9 +154,17 @@ def parse_vision_response(
         cleaned = cleaned.strip()
         
         result = json.loads(cleaned)
+        
+        # ISSUE 2: Extract is_appliance_image, default to True if not present
+        is_appliance = result.get("is_appliance_image", True)
+        # Handle string "true"/"false" from LLM
+        if isinstance(is_appliance, str):
+            is_appliance = is_appliance.lower() == "true"
+        
         return {
             "summary": result.get("summary", "Analysis complete."),
-            "troubleshooting": result.get("troubleshooting", "")
+            "troubleshooting": result.get("troubleshooting", ""),
+            "is_appliance_image": bool(is_appliance)
         }
     except json.JSONDecodeError:
         print("[Vision] Failed to parse JSON, using raw text")
@@ -163,9 +185,11 @@ def parse_vision_response(
             else:
                 troubleshooting_lines.append(line)
         
+        # Default to True if we can't parse - let human review
         return {
             "summary": "\n".join(summary_lines).strip() or response_text[:500],
-            "troubleshooting": "\n".join(troubleshooting_lines).strip()
+            "troubleshooting": "\n".join(troubleshooting_lines).strip(),
+            "is_appliance_image": True
         }
 
 
@@ -173,7 +197,10 @@ def fallback_analysis(
     appliance_type: Optional[str],
     symptom_summary: Optional[str]
 ) -> Dict[str, Any]:
-    """Provide a fallback response when vision analysis is unavailable."""
+    """Provide a fallback response when vision analysis is unavailable.
+    
+    ISSUE 2: Now includes is_appliance_image field (defaults to True for fallback).
+    """
     appliance = appliance_type or "appliance"
     
     summary = f"Image received for {appliance} diagnosis."
@@ -189,5 +216,6 @@ If the issue persists, a technician visit may be necessary"""
     
     return {
         "summary": summary,
-        "troubleshooting": troubleshooting
+        "troubleshooting": troubleshooting,
+        "is_appliance_image": True  # Default to True for fallback
     }

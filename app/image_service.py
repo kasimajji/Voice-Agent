@@ -109,7 +109,8 @@ def mark_token_used(token: str, image_url: str) -> Optional[ImageUploadToken]:
 def update_token_analysis(
     token: str,
     analysis_summary: str,
-    troubleshooting_tips: str
+    troubleshooting_tips: str,
+    is_appliance_image: bool = True
 ) -> Optional[ImageUploadToken]:
     """Update the token with vision analysis results."""
     db = SessionLocal()
@@ -121,10 +122,43 @@ def update_token_analysis(
         if upload_token:
             upload_token.analysis_summary = analysis_summary
             upload_token.troubleshooting_tips = troubleshooting_tips
+            upload_token.is_appliance_image = is_appliance_image
             db.commit()
             db.refresh(upload_token)
         
         return upload_token
+    finally:
+        db.close()
+
+
+def get_upload_status_by_call_sid(call_sid: str) -> Optional[dict]:
+    """
+    Check if an image has been uploaded for a given call.
+    Used by voice flow to poll for upload completion.
+    
+    Returns:
+        dict with upload status and analysis if available, or None if no token exists
+    """
+    db = SessionLocal()
+    try:
+        # Get the most recent token for this call
+        upload_token = db.query(ImageUploadToken).filter(
+            ImageUploadToken.call_sid == call_sid
+        ).order_by(ImageUploadToken.created_at.desc()).first()
+        
+        if not upload_token:
+            return None
+        
+        return {
+            "token": upload_token.token,
+            "email": upload_token.email,
+            "image_uploaded": upload_token.used_at is not None,
+            "analysis_ready": upload_token.analysis_summary is not None,
+            "analysis_summary": upload_token.analysis_summary,
+            "troubleshooting_tips": upload_token.troubleshooting_tips,
+            "is_appliance_image": upload_token.is_appliance_image,
+            "appliance_type": upload_token.appliance_type
+        }
     finally:
         db.close()
 

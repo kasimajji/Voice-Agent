@@ -264,11 +264,22 @@ async def upload_image(token: str, image: UploadFile = File(...)):
             symptom_summary=upload_token.symptom_summary
         )
         
+        # ISSUE 2: Pass is_appliance_image to DB for voice flow to check
+        is_appliance = analysis.get("is_appliance_image", True)
+        
         update_token_analysis(
             token=token,
             analysis_summary=analysis.get("summary", ""),
-            troubleshooting_tips=analysis.get("troubleshooting", "")
+            troubleshooting_tips=analysis.get("troubleshooting", ""),
+            is_appliance_image=is_appliance
         )
+        
+        # ISSUE 2.4: Show different page if not an appliance image
+        if not is_appliance:
+            return HTMLResponse(content=not_appliance_page(
+                appliance_type=upload_token.appliance_type,
+                summary=analysis.get("summary", "")
+            ))
         
         return HTMLResponse(content=success_page(
             appliance_type=upload_token.appliance_type,
@@ -331,6 +342,127 @@ def error_page(title: str, message: str) -> str:
         <div class="contact">
             Need help? Call Sears Home Services
         </div>
+    </div>
+</body>
+</html>
+"""
+
+
+def not_appliance_page(appliance_type: str, summary: str) -> str:
+    """
+    ISSUE 2.4: Generate a page for when uploaded image is NOT an appliance.
+    Prompts user to upload a correct image.
+    """
+    appliance_text = appliance_type or "appliance"
+    
+    return f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Please Upload Appliance Photo - Sears Home Services</title>
+    <style>
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }}
+        .container {{
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            max-width: 500px;
+            width: 100%;
+            padding: 40px;
+            text-align: center;
+        }}
+        .icon {{ font-size: 64px; margin-bottom: 16px; }}
+        h1 {{ color: #f5576c; font-size: 24px; margin-bottom: 16px; }}
+        p {{ color: #666; line-height: 1.6; margin-bottom: 16px; }}
+        .what-we-saw {{
+            background: #fff5f5;
+            border-radius: 8px;
+            padding: 16px;
+            margin: 20px 0;
+            text-align: left;
+        }}
+        .what-we-saw h3 {{
+            color: #f5576c;
+            font-size: 14px;
+            margin-bottom: 8px;
+        }}
+        .what-we-saw p {{
+            font-size: 14px;
+            color: #666;
+            margin: 0;
+        }}
+        .tips {{
+            background: #f0f4ff;
+            border-radius: 8px;
+            padding: 16px;
+            margin: 20px 0;
+            text-align: left;
+        }}
+        .tips h3 {{
+            color: #667eea;
+            font-size: 14px;
+            margin-bottom: 8px;
+        }}
+        .tips ul {{
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }}
+        .tips li {{
+            font-size: 13px;
+            color: #666;
+            padding: 4px 0;
+        }}
+        .tips li::before {{
+            content: "✓ ";
+            color: #667eea;
+        }}
+        .btn {{
+            display: inline-block;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            text-decoration: none;
+            padding: 14px 28px;
+            border-radius: 8px;
+            font-weight: 600;
+            margin-top: 16px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="icon">📷</div>
+        <h1>Please Upload a Photo of Your {appliance_text.title()}</h1>
+        <p>The image you uploaded doesn't appear to show a home appliance.</p>
+        
+        <div class="what-we-saw">
+            <h3>What we saw:</h3>
+            <p>{summary}</p>
+        </div>
+        
+        <div class="tips">
+            <h3>For best results, please upload a photo that shows:</h3>
+            <ul>
+                <li>The {appliance_text} itself</li>
+                <li>Any error codes or warning lights on the display</li>
+                <li>Visible damage, leaks, or frost buildup</li>
+                <li>The model number label if possible</li>
+            </ul>
+        </div>
+        
+        <p>You can use the same link to upload another photo.</p>
+        <a href="javascript:history.back()" class="btn">← Try Again</a>
     </div>
 </body>
 </html>
