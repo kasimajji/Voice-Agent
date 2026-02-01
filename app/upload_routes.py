@@ -264,14 +264,13 @@ async def upload_image(token: str, image: UploadFile = File(...)):
             symptom_summary=upload_token.symptom_summary
         )
         
-        # ISSUE 2: Pass is_appliance_image to DB for voice flow to check
+        # Check if it's actually an appliance image
         is_appliance = analysis.get("is_appliance_image", True)
         
         update_token_analysis(
             token=token,
             analysis_summary=analysis.get("summary", ""),
-            troubleshooting_tips=analysis.get("troubleshooting", ""),
-            is_appliance_image=is_appliance
+            troubleshooting_tips=analysis.get("troubleshooting", "")
         )
         
         # ISSUE 2.4: Show different page if not an appliance image

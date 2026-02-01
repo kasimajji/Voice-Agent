@@ -34,63 +34,67 @@ def extract_email_from_speech(speech_text: str) -> str:
     """
     ISSUE 1: Improved email extraction from speech-to-text.
     
-    Handles two scenarios:
-    1. Letter-by-letter spelling: "K A S I dot M A J J I at gmail dot com"
-    2. Full email spoken: "kasi.majji at gmail dot com"
-    
-    Normalizes by:
-    - Converting spoken words to symbols (" at " → @, " dot " → .)
-    - Removing spaces between letters
-    - Lowercasing everything
+    Handles scenarios like:
+    - "K. A s. I dot m. A j. J. I at the rate gmail.com" (Twilio adds periods after letters)
+    - "kasi dot majji at gmail dot com"
+    - "k a s i at gmail.com"
     """
     text = speech_text.lower().strip()
+    print(f"[Email Extract] Raw input: {text}")
     
-    # Stage 1: Replace spoken words with symbols (before removing spaces)
-    # Order matters - do longer phrases first
-    replacements = [
-        # Common TLD spoken forms
-        ("dot com", ".com"),
-        ("dot net", ".net"),
-        ("dot org", ".org"),
-        ("dot edu", ".edu"),
-        ("dot co dot uk", ".co.uk"),
-        ("dot co", ".co"),
-        # At symbol variations
-        ("at symbol", "@"),
-        ("at sign", "@"),
-        (" at ", "@"),
-        # Dot variations
-        (" dot ", "."),
-        (" period ", "."),
-        (" point ", "."),
-        # Other symbols
-        (" underscore ", "_"),
-        (" dash ", "-"),
-        (" hyphen ", "-"),
-        # Common domains (preserve as-is)
-        ("gmail", "gmail"),
-        ("yahoo", "yahoo"),
-        ("hotmail", "hotmail"),
-        ("outlook", "outlook"),
-        ("icloud", "icloud"),
+    # Stage 1: Remove periods that follow single letters (Twilio artifact)
+    # "k. a. s. i." → "k a s i"
+    text = re.sub(r'\b([a-z])\.\s*', r'\1 ', text)
+    
+    # Stage 2: Normalize @ symbol variations (do this early)
+    at_patterns = [
+        r'at\s+the\s+rate\s*,?',  # "at the rate" or "at the rate,"
+        r'at\s+rate',
+        r'at\s+symbol',
+        r'at\s+sign',
+        r'\s+at\s+',  # " at "
     ]
+    for pattern in at_patterns:
+        text = re.sub(pattern, ' @ ', text, flags=re.IGNORECASE)
     
-    for old, new in replacements:
-        text = text.replace(old, new)
+    # Stage 3: Normalize common domain endings
+    text = re.sub(r'dot\s*com\b', '.com', text)
+    text = re.sub(r'dot\s*net\b', '.net', text)
+    text = re.sub(r'dot\s*org\b', '.org', text)
+    text = re.sub(r'dot\s*edu\b', '.edu', text)
+    text = re.sub(r'dot\s*co\s*dot\s*uk\b', '.co.uk', text)
     
-    # Stage 2: Handle letter-by-letter spelling
-    # If there are single letters separated by spaces, join them
-    # e.g., "k a s i" → "kasi"
+    # Stage 4: Replace "dot" with actual dot (for username part)
+    text = re.sub(r'\s+dot\s+', '.', text)
+    text = re.sub(r'\s+period\s+', '.', text)
+    text = re.sub(r'\s+point\s+', '.', text)
+    
+    # Stage 5: Other symbol replacements
+    text = re.sub(r'\s+underscore\s+', '_', text)
+    text = re.sub(r'\s+dash\s+', '-', text)
+    text = re.sub(r'\s+hyphen\s+', '-', text)
+    
+    # Stage 6: Fix common misheard domains
+    text = re.sub(r'\bjmail\b', 'gmail', text)
+    text = re.sub(r'\bg\s*mail\b', 'gmail', text)
+    
+    print(f"[Email Extract] After normalization: {text}")
+    
+    # Stage 7: Handle letter-by-letter spelling
+    # Join single letters that are separated by spaces
     words = text.split()
     result_parts = []
     letter_buffer = []
     
     for word in words:
-        # Check if it's a single letter or symbol
+        word = word.strip()
+        if not word:
+            continue
+        # Check if it's a single letter
         if len(word) == 1 and word.isalpha():
             letter_buffer.append(word)
         else:
-            # Flush letter buffer
+            # Flush letter buffer before adding this word
             if letter_buffer:
                 result_parts.append("".join(letter_buffer))
                 letter_buffer = []
@@ -100,19 +104,25 @@ def extract_email_from_speech(speech_text: str) -> str:
     if letter_buffer:
         result_parts.append("".join(letter_buffer))
     
-    # Join without spaces
+    # Join parts - keep @ and . but remove other spaces
     text = "".join(result_parts)
     
-    # Stage 3: Clean up any remaining issues
-    text = text.replace(" ", "")  # Remove any remaining spaces
+    # Clean up multiple dots or spaces around symbols
+    text = re.sub(r'\.+', '.', text)  # Multiple dots → single dot
+    text = re.sub(r'\s+', '', text)   # Remove all remaining spaces
+    
+    print(f"[Email Extract] After letter join: {text}")
     
     # Try to find an email pattern
     email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
     match = re.search(email_pattern, text)
     
     if match:
-        return match.group(0)
+        result = match.group(0)
+        print(f"[Email Extract] Final email: {result}")
+        return result
     
+    print(f"[Email Extract] No pattern match, returning: {text}")
     return text
 
 
@@ -137,8 +147,8 @@ def spell_email_for_speech(email: str) -> str:
         else:
             result.append(f" {char} ")
     
-    # Clean up extra spaces
-    return " ".join(result.split())
+    # Join list to string, then clean up extra spaces
+    return " ".join("".join(result).split())
 
 
 def is_yes_response(text: str) -> bool:
