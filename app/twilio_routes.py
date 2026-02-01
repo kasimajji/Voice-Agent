@@ -30,58 +30,132 @@ VOICE_CONTINUE_URL = f"{APP_BASE_URL}/twilio/voice/continue"
 MAX_UPLOAD_POLL_COUNT = 10  # ~2.5 minutes with 15s pauses
 
 
-def extract_email_from_speech(speech_text: str) -> str:
+def extract_email_from_speech(speech_text: str) -> str | None:
     """
-    ISSUE 1: Improved email extraction from speech-to-text.
+    Robust email extraction from Twilio speech-to-text.
     
     Handles scenarios like:
-    - "K. A s. I dot m. A j. J. I at the rate gmail.com" (Twilio adds periods after letters)
+    - "K. A s. I dot m. A j. J. I n n. N n. At gmail.com." (Twilio period artifacts + noise)
     - "kasi dot majji at gmail dot com"
     - "k a s i at gmail.com"
+    - "cassi at gmail dot com" (mishearing is OK - confirmation will filter)
+    
+    Returns:
+        Extracted email string if valid pattern found, None otherwise.
     """
+    if not speech_text or not speech_text.strip():
+        print("[Email Extract] Empty input")
+        return None
+    
     text = speech_text.lower().strip()
-    print(f"[Email Extract] Raw input: {text}")
+    print(f"[Email Extract] Stage 0 - Raw input: {text}")
     
-    # Stage 1: Remove periods that follow single letters (Twilio artifact)
+    # -------------------------------------------------------------------------
+    # Stage 1: Remove Twilio's period-after-single-letter artifacts
     # "k. a. s. i." → "k a s i"
-    text = re.sub(r'\b([a-z])\.\s*', r'\1 ', text)
+    # Also handles "k, a, s, i" (comma artifacts)
+    # -------------------------------------------------------------------------
+    text = re.sub(r'\b([a-z])[.,]\s*', r'\1 ', text)
+    print(f"[Email Extract] Stage 1 - After removing letter periods: {text}")
     
-    # Stage 2: Normalize @ symbol variations (do this early)
-    at_patterns = [
-        r'at\s+the\s+rate\s*,?',  # "at the rate" or "at the rate,"
-        r'at\s+rate',
-        r'at\s+symbol',
-        r'at\s+sign',
-        r'\s+at\s+',  # " at "
+    # -------------------------------------------------------------------------
+    # Stage 2: Remove common noise words that Twilio might insert
+    # "k ah yes i" → "k i" (remove filler words between letters)
+    # -------------------------------------------------------------------------
+    noise_words = [
+        r'\bah\b', r'\buh\b', r'\bum\b', r'\bhmm\b', r'\boh\b',
+        r'\byes\b', r'\bokay\b', r'\bok\b', r'\bso\b', r'\band\b',
+        r'\blike\b', r'\bthe\b', r'\bis\b', r'\bit\s+is\b',
+        r'\bthat\s+is\b', r'\bmy\s+email\s+is\b', r'\bemail\s+is\b',
+        r'\bmy\s+email\b', r'\bemail\b', r'\baddress\b',
     ]
-    for pattern in at_patterns:
-        text = re.sub(pattern, ' @ ', text, flags=re.IGNORECASE)
+    for noise in noise_words:
+        text = re.sub(noise, ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s+', ' ', text).strip()
+    print(f"[Email Extract] Stage 2 - After noise removal: {text}")
     
-    # Stage 3: Normalize common domain endings
-    text = re.sub(r'dot\s*com\b', '.com', text)
-    text = re.sub(r'dot\s*net\b', '.net', text)
-    text = re.sub(r'dot\s*org\b', '.org', text)
-    text = re.sub(r'dot\s*edu\b', '.edu', text)
-    text = re.sub(r'dot\s*co\s*dot\s*uk\b', '.co.uk', text)
+    # -------------------------------------------------------------------------
+    # Stage 3: Normalize @ symbol variations (must happen before domain handling)
+    # -------------------------------------------------------------------------
+    at_replacements = [
+        (r'at\s+the\s+rate\s*,?\s*', ' @ '),
+        (r'at\s+rate\s*', ' @ '),
+        (r'at\s+symbol\s*', ' @ '),
+        (r'at\s+sign\s*', ' @ '),
+        (r'\s+at\s+', ' @ '),
+        (r'^at\s+', ' @ '),  # "at gmail.com" at start
+    ]
+    for pattern, replacement in at_replacements:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    print(f"[Email Extract] Stage 3 - After @ normalization: {text}")
     
-    # Stage 4: Replace "dot" with actual dot (for username part)
-    text = re.sub(r'\s+dot\s+', '.', text)
-    text = re.sub(r'\s+period\s+', '.', text)
-    text = re.sub(r'\s+point\s+', '.', text)
+    # -------------------------------------------------------------------------
+    # Stage 4: Normalize common domain endings (before generic "dot" handling)
+    # -------------------------------------------------------------------------
+    domain_replacements = [
+        (r'\s*dot\s*co\s*dot\s*uk\b', '.co.uk'),
+        (r'\s*dot\s*com\b', '.com'),
+        (r'\s*dot\s*net\b', '.net'),
+        (r'\s*dot\s*org\b', '.org'),
+        (r'\s*dot\s*edu\b', '.edu'),
+        (r'\s*dot\s*co\b', '.co'),
+        (r'\s*dot\s*io\b', '.io'),
+    ]
+    for pattern, replacement in domain_replacements:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    print(f"[Email Extract] Stage 4 - After domain normalization: {text}")
     
-    # Stage 5: Other symbol replacements
-    text = re.sub(r'\s+underscore\s+', '_', text)
-    text = re.sub(r'\s+dash\s+', '-', text)
-    text = re.sub(r'\s+hyphen\s+', '-', text)
+    # -------------------------------------------------------------------------
+    # Stage 5: Replace standalone dot/period/point with actual dot
+    # -------------------------------------------------------------------------
+    dot_replacements = [
+        (r'\s+dot\s+', '.'),
+        (r'\s+period\s+', '.'),
+        (r'\s+point\s+', '.'),
+    ]
+    for pattern, replacement in dot_replacements:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
     
-    # Stage 6: Fix common misheard domains
-    text = re.sub(r'\bjmail\b', 'gmail', text)
-    text = re.sub(r'\bg\s*mail\b', 'gmail', text)
+    # -------------------------------------------------------------------------
+    # Stage 6: Other symbol replacements
+    # -------------------------------------------------------------------------
+    symbol_replacements = [
+        (r'\s+underscore\s+', '_'),
+        (r'\s+under\s+score\s+', '_'),
+        (r'\s+dash\s+', '-'),
+        (r'\s+hyphen\s+', '-'),
+        (r'\s+minus\s+', '-'),
+    ]
+    for pattern, replacement in symbol_replacements:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    print(f"[Email Extract] Stage 6 - After symbol normalization: {text}")
     
-    print(f"[Email Extract] After normalization: {text}")
+    # -------------------------------------------------------------------------
+    # Stage 7: Fix common misheard domain names
+    # -------------------------------------------------------------------------
+    domain_corrections = [
+        (r'\bjmail\b', 'gmail'),
+        (r'\bg\s+mail\b', 'gmail'),
+        (r'\bgee\s*mail\b', 'gmail'),
+        (r'\bji\s*mail\b', 'gmail'),
+        (r'\byahoo\b', 'yahoo'),
+        (r'\byahoo\b', 'yahoo'),
+        (r'\bhotmail\b', 'hotmail'),
+        (r'\bhot\s+mail\b', 'hotmail'),
+        (r'\boutlook\b', 'outlook'),
+        (r'\bout\s+look\b', 'outlook'),
+        (r'\bicloud\b', 'icloud'),
+        (r'\bi\s+cloud\b', 'icloud'),
+    ]
+    for pattern, replacement in domain_corrections:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    print(f"[Email Extract] Stage 7 - After domain corrections: {text}")
     
-    # Stage 7: Handle letter-by-letter spelling
-    # Join single letters that are separated by spaces
+    # -------------------------------------------------------------------------
+    # Stage 8: Handle letter-by-letter spelling
+    # Join sequences of single letters: "k a s i" → "kasi"
+    # But preserve symbols: @, ., _, -
+    # -------------------------------------------------------------------------
     words = text.split()
     result_parts = []
     letter_buffer = []
@@ -90,48 +164,84 @@ def extract_email_from_speech(speech_text: str) -> str:
         word = word.strip()
         if not word:
             continue
-        # Check if it's a single letter
+        
+        # Check if it's a single letter (not a symbol)
         if len(word) == 1 and word.isalpha():
             letter_buffer.append(word)
         else:
-            # Flush letter buffer before adding this word
+            # Flush any accumulated letters first
             if letter_buffer:
                 result_parts.append("".join(letter_buffer))
                 letter_buffer = []
+            # Add the current word/symbol
             result_parts.append(word)
     
     # Flush remaining letters
     if letter_buffer:
         result_parts.append("".join(letter_buffer))
     
-    # Join parts - keep @ and . but remove other spaces
+    # Join all parts without spaces
     text = "".join(result_parts)
+    print(f"[Email Extract] Stage 8 - After letter joining: {text}")
     
-    # Clean up multiple dots or spaces around symbols
-    text = re.sub(r'\.+', '.', text)  # Multiple dots → single dot
-    text = re.sub(r'\s+', '', text)   # Remove all remaining spaces
+    # -------------------------------------------------------------------------
+    # Stage 9: Clean up artifacts
+    # -------------------------------------------------------------------------
+    text = re.sub(r'\.+', '.', text)      # Multiple dots → single dot
+    text = re.sub(r'@+', '@', text)       # Multiple @ → single @
+    text = re.sub(r'^\.+', '', text)      # Remove leading dots
+    text = re.sub(r'\.+$', '', text)      # Remove trailing dots (before TLD)
+    text = re.sub(r'\s+', '', text)       # Remove any remaining spaces
+    text = text.strip('.,;:!?')           # Remove trailing punctuation
+    print(f"[Email Extract] Stage 9 - After cleanup: {text}")
     
-    print(f"[Email Extract] After letter join: {text}")
+    # -------------------------------------------------------------------------
+    # Stage 10: Reduce excessive letter repetition in local part
+    # "majjinnnn" → "majjinn" (3+ same letter → 2)
+    # Only apply to the local part (before @)
+    # -------------------------------------------------------------------------
+    if '@' in text:
+        local_part, domain_part = text.split('@', 1)
+        # Reduce 3+ consecutive same letters to 2
+        local_part = re.sub(r'([a-z])\1{2,}', r'\1\1', local_part)
+        text = f"{local_part}@{domain_part}"
+        print(f"[Email Extract] Stage 10 - After repeat reduction: {text}")
     
-    # Try to find an email pattern
+    # -------------------------------------------------------------------------
+    # Stage 11: Extract email using regex
+    # -------------------------------------------------------------------------
     email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
     match = re.search(email_pattern, text)
     
     if match:
-        result = match.group(0)
-        print(f"[Email Extract] Final email: {result}")
+        result = match.group(0).lower()
+        # Final cleanup: remove any leading/trailing dots from local part
+        if result.startswith('.'):
+            result = result.lstrip('.')
+        print(f"[Email Extract] Stage 11 - Final email: {result}")
         return result
     
-    print(f"[Email Extract] No pattern match, returning: {text}")
-    return text
+    print(f"[Email Extract] Stage 11 - No valid email pattern found in: {text}")
+    return None
 
 
 def spell_email_for_speech(email: str) -> str:
     """
-    ISSUE 1: Convert email to speakable format for confirmation.
+    Convert email to speakable format for voice confirmation.
     
     Example: "kasi.majji@gmail.com" → "k a s i dot m a j j i at g m a i l dot com"
+    
+    Handles:
+    - @ → "at"
+    - . → "dot"
+    - _ → "underscore"
+    - - → "dash"
+    - Letters and numbers are spelled out with spaces
+    - Skips any weird characters that shouldn't be spoken
     """
+    if not email:
+        return ""
+    
     result = []
     for char in email.lower():
         if char == '@':
@@ -142,13 +252,16 @@ def spell_email_for_speech(email: str) -> str:
             result.append(" underscore ")
         elif char == '-':
             result.append(" dash ")
+        elif char == '+':
+            result.append(" plus ")
         elif char.isalnum():
             result.append(f" {char} ")
-        else:
-            result.append(f" {char} ")
+        # Skip any other characters (don't speak them)
     
-    # Join list to string, then clean up extra spaces
-    return " ".join("".join(result).split())
+    # Join and clean up multiple spaces
+    spelled = " ".join("".join(result).split())
+    print(f"[Email Spell] {email} → {spelled}")
+    return spelled
 
 
 def is_yes_response(text: str) -> bool:
@@ -186,7 +299,7 @@ async def voice_entry(request: Request):
     response = VoiceResponse()
     
     response.say(
-        "Hi, this is the Sears Home Services assistant demo. "
+        "Hi, this is the Sears Home Services assistant. "
         "Thanks for calling. I'll help you troubleshoot your appliance issue."
     )
     
@@ -199,7 +312,7 @@ async def voice_entry(request: Request):
     )
     gather.say(
         "To get started, what appliance are you calling about? "
-        "For example, a washer, dryer, or refrigerator."
+        "For example, a washer, dryer, or refrigerator, dishwasher, oven, or HVAC system."
     )
     
     response.redirect(VOICE_CONTINUE_URL)
@@ -411,20 +524,27 @@ async def voice_continue(request: Request):
         if "photo" in text_lower or "picture" in text_lower or "image" in text_lower or "upload" in text_lower:
             # User wants Tier 3 image upload
             state["step"] = "collect_email"
+            state["email_attempts"] = 0  # Reset email attempts
             update_state(call_sid, state)
             
             print(f"[Tier 3] CallSid: {call_sid} - User chose image upload")
             
+            # Enhanced Gather for initial email collection
             gather = response.gather(
                 input="speech",
-                timeout=5,
-                speech_timeout="3",
+                timeout=10,  # Longer timeout for spelling
+                speech_timeout="4",  # More pause tolerance between letters
                 action=VOICE_CONTINUE_URL,
-                method="POST"
+                method="POST",
+                language="en-US",
+                hints="gmail.com, yahoo.com, outlook.com, hotmail.com, icloud.com, "
+                      "g mail dot com, at gmail dot com, at yahoo dot com, "
+                      "dot com, dot net, dot org, at the rate"
             )
             gather.say(
                 "Great! I'll send you an upload link by email. "
-                "Please say your email address slowly and clearly."
+                "Please spell your email slowly, letter by letter. "
+                "For example: k, a, s, i, dot, m, a, j, j, i, at, gmail, dot, com."
             )
             response.redirect(VOICE_CONTINUE_URL)
         
@@ -485,12 +605,14 @@ async def voice_continue(request: Request):
             
             print(f"[Tier 3] CallSid: {call_sid} - Email captured: {email}, awaiting confirmation")
             
+            # Confirmation gather - yes/no response
             gather = response.gather(
                 input="speech",
-                timeout=5,
+                timeout=7,
                 speech_timeout="3",
                 action=VOICE_CONTINUE_URL,
-                method="POST"
+                method="POST",
+                language="en-US"
             )
             gather.say(
                 f"I heard {spelled_email}. "
@@ -502,18 +624,25 @@ async def voice_continue(request: Request):
             state["email_attempts"] = state.get("email_attempts", 0) + 1
             update_state(call_sid, state)
             
+            print(f"[Tier 3] CallSid: {call_sid} - Email attempt {state['email_attempts']}, extracted: {email}")
+            
             if state["email_attempts"] <= 3:
+                # Retry email capture with enhanced Gather settings
                 gather = response.gather(
                     input="speech",
-                    timeout=5,
-                    speech_timeout="3",
+                    timeout=10,  # Longer timeout for spelling
+                    speech_timeout="4",  # More pause tolerance
                     action=VOICE_CONTINUE_URL,
-                    method="POST"
+                    method="POST",
+                    language="en-US",
+                    hints="gmail.com, yahoo.com, outlook.com, hotmail.com, icloud.com, "
+                          "g mail dot com, at gmail dot com, at yahoo dot com, "
+                          "dot com, dot net, dot org, at the rate"
                 )
                 gather.say(
                     "I'm sorry, I didn't catch a valid email address. "
-                    "Please say your email slowly. You can spell it out letter by letter, "
-                    "like k a s i dot m a j j i at gmail dot com."
+                    "Please spell your email slowly, letter by letter. "
+                    "For example: k, a, s, i, dot, m, a, j, j, i, at, gmail, dot, com."
                 )
                 response.redirect(VOICE_CONTINUE_URL)
             else:
@@ -527,11 +656,12 @@ async def voice_continue(request: Request):
                     timeout=5,
                     speech_timeout="3",
                     action=VOICE_CONTINUE_URL,
-                    method="POST"
+                    method="POST",
+                    language="en-US"
                 )
                 gather.say(
                     "I'm having trouble capturing the email. "
-                    "I'll skip image upload and continue with scheduling. "
+                    "Let me help you schedule a technician instead. "
                     "What is your ZIP code?"
                 )
                 response.redirect(VOICE_CONTINUE_URL)
@@ -609,20 +739,27 @@ async def voice_continue(request: Request):
             state["email_confirm_attempts"] = state.get("email_confirm_attempts", 0) + 1
             state["pending_email"] = None
             
+            print(f"[Tier 3] CallSid: {call_sid} - Email rejected, attempt {state['email_confirm_attempts']}")
+            
             if state["email_confirm_attempts"] <= 2:
                 state["step"] = "collect_email"
                 update_state(call_sid, state)
                 
+                # Retry with enhanced Gather for email
                 gather = response.gather(
                     input="speech",
-                    timeout=5,
-                    speech_timeout="3",
+                    timeout=10,
+                    speech_timeout="4",
                     action=VOICE_CONTINUE_URL,
-                    method="POST"
+                    method="POST",
+                    language="en-US",
+                    hints="gmail.com, yahoo.com, outlook.com, hotmail.com, icloud.com, "
+                          "g mail dot com, at gmail dot com, dot com, dot net, at the rate"
                 )
                 gather.say(
                     "No problem, let's try again. "
-                    "Please say your email address slowly and clearly."
+                    "Please spell your email slowly, letter by letter. "
+                    "Say 'dot' for periods and 'at' for the at symbol."
                 )
                 response.redirect(VOICE_CONTINUE_URL)
             else:
@@ -636,23 +773,25 @@ async def voice_continue(request: Request):
                     timeout=5,
                     speech_timeout="3",
                     action=VOICE_CONTINUE_URL,
-                    method="POST"
+                    method="POST",
+                    language="en-US"
                 )
                 gather.say(
                     "I'm having trouble with the email. "
-                    "I'll skip image upload and continue with scheduling. "
+                    "Let me help you schedule a technician instead. "
                     "What is your ZIP code?"
                 )
                 response.redirect(VOICE_CONTINUE_URL)
         
         else:
-            # Unclear response, ask again
+            # Unclear response, ask again for yes/no
             gather = response.gather(
                 input="speech",
-                timeout=5,
+                timeout=7,
                 speech_timeout="3",
                 action=VOICE_CONTINUE_URL,
-                method="POST"
+                method="POST",
+                language="en-US"
             )
             spelled_email = spell_email_for_speech(pending_email) if pending_email else "the email"
             gather.say(
