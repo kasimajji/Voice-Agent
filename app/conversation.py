@@ -20,7 +20,9 @@ def get_state(call_id: str) -> dict:
         "offered_slots": [],
         "customer_phone": None,
         "appointment_booked": False,
-        "appointment_id": None
+        "appointment_id": None,
+        "no_input_attempts": 0,
+        "no_match_attempts": 0
     }
     sessions[call_id] = initial_state
     return initial_state
