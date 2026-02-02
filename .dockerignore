@@ -1,53 +1,37 @@
-# Environment files (secrets - loaded at runtime)
+# Environment files (loaded at runtime, not in image)
 .env
 app/.env
 *.env
 
-# Python cache
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
 *.pyc
-
-# Virtual environments
 venv/
-env/
 .venv/
 
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
+# Database (mounted as volume)
+*.db
+*.sqlite3
+data/
+
+# Uploads (mounted as volume)
+uploads/
 
 # Git
 .git/
 .gitignore
 
-# Database files (will be mounted as volume)
-*.db
-*.sqlite
-*.sqlite3
+# IDE
+.idea/
+.vscode/
 
-# Uploads (will be mounted as volume)
-uploads/
+# Docs (not needed in container)
+*.md
 
-# Test files
+# Tests
 test_*.py
 tests/
-pytest_cache/
-.pytest_cache/
 
-# Documentation (not needed in container)
-*.md
-docs/
-
-# OS files
+# OS
 .DS_Store
-Thumbs.db
-
-# Logs
-*.log
-logs/
