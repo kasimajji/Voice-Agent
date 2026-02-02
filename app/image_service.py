@@ -109,7 +109,8 @@ def mark_token_used(token: str, image_url: str) -> Optional[ImageUploadToken]:
 def update_token_analysis(
     token: str,
     analysis_summary: str,
-    troubleshooting_tips: str
+    troubleshooting_tips: str,
+    is_appliance_image: bool = True
 ) -> Optional[ImageUploadToken]:
     """Update the token with vision analysis results."""
     db = SessionLocal()
@@ -121,6 +122,7 @@ def update_token_analysis(
         if upload_token:
             upload_token.analysis_summary = analysis_summary
             upload_token.troubleshooting_tips = troubleshooting_tips
+            upload_token.is_appliance_image = is_appliance_image
             db.commit()
             db.refresh(upload_token)
         
@@ -154,7 +156,8 @@ def get_upload_status_by_call_sid(call_sid: str) -> Optional[dict]:
             "analysis_ready": upload_token.analysis_summary is not None,
             "analysis_summary": upload_token.analysis_summary,
             "troubleshooting_tips": upload_token.troubleshooting_tips,
-            "appliance_type": upload_token.appliance_type
+            "appliance_type": upload_token.appliance_type,
+            "is_appliance_image": upload_token.is_appliance_image
         }
     finally:
         db.close()

@@ -75,5 +75,4 @@ class ImageUploadToken(Base):
     image_url = Column(String(500), nullable=True)
     analysis_summary = Column(Text, nullable=True)
     troubleshooting_tips = Column(Text, nullable=True)
-    # NOTE: is_appliance_image column can be added later if needed
-    # is_appliance_image = Column(Boolean, nullable=True, default=None)
+    is_appliance_image = Column(Boolean, nullable=True, default=None)

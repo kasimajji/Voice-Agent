@@ -1,4 +1,5 @@
 import json
+import re
 import google.generativeai as genai
 from .config import GEMINI_API_KEY, GEMINI_MODEL
 
@@ -115,6 +116,206 @@ User text:
         
     except Exception as e:
         print(f"[LLM Error] Appliance classification failed: {e}")
+        return None
+
+
+# Regex for extracting email from LLM output
+_EMAIL_REGEX = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+
+# Valid TLDs for email validation
+_VALID_TLDS = {'.com', '.net', '.org', '.edu', '.gov', '.io', '.co', '.uk', '.ca', '.in'}
+
+# Number word to digit mapping
+_NUMBER_WORDS = {
+    'zero': '0', 'oh': '0', 'o': '0',
+    'one': '1', 'won': '1',
+    'two': '2', 'to': '2', 'too': '2',
+    'three': '3', 'tree': '3',
+    'four': '4', 'for': '4', 'fore': '4',
+    'five': '5',
+    'six': '6', 'sicks': '6',
+    'seven': '7',
+    'eight': '8', 'ate': '8',
+    'nine': '9', 'niner': '9',
+}
+
+
+def _normalize_speech_for_email(speech_text: str) -> str:
+    """
+    Pre-process speech-to-text before sending to LLM for email extraction.
+    Handles common STT patterns deterministically.
+    """
+    text = speech_text.lower().strip()
+    
+    # Remove common filler words/phrases
+    fillers = ['my email is', 'my email address is', 'its', "it's", 'yeah', 'yes', 
+               'sure', 'um', 'uh', 'like', 'so', 'okay', 'ok']
+    for filler in fillers:
+        text = text.replace(filler, ' ')
+    
+    # Normalize @ symbol patterns
+    at_patterns = [
+        (r'\bat\s+the\s+rate\b', ' @ '),
+        (r'\bat\s+rate\b', ' @ '),
+        (r'\ba\s+great\b', ' @ '),  # "a great" misheard as "at rate"
+        (r'\bat\s+sign\b', ' @ '),
+        (r'\bat\s+symbol\b', ' @ '),
+        (r'\s+at\s+', ' @ '),
+    ]
+    for pattern, replacement in at_patterns:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    
+    # Normalize domain patterns
+    domain_patterns = [
+        (r'\bg\s*mail\b', 'gmail'),
+        (r'\bgee\s*mail\b', 'gmail'),
+        (r'\bjmail\b', 'gmail'),
+        (r'\byahoo\b', 'yahoo'),
+        (r'\boutlook\b', 'outlook'),
+        (r'\bhotmail\b', 'hotmail'),
+        (r'\bicloud\b', 'icloud'),
+    ]
+    for pattern, replacement in domain_patterns:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    
+    # Normalize "dot com", "dot net", etc.
+    tld_patterns = [
+        (r'\bdot\s*com\b', '.com'),
+        (r'\bdot\s*net\b', '.net'),
+        (r'\bdot\s*org\b', '.org'),
+        (r'\bdot\s*edu\b', '.edu'),
+        (r'\bdot\s*co\s*dot\s*uk\b', '.co.uk'),
+        (r'\bdot\s*io\b', '.io'),
+    ]
+    for pattern, replacement in tld_patterns:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    
+    # Convert number words to digits
+    words = text.split()
+    converted = []
+    for word in words:
+        # Clean punctuation from word for matching
+        clean_word = re.sub(r'[.,;:!?]', '', word)
+        if clean_word in _NUMBER_WORDS:
+            converted.append(_NUMBER_WORDS[clean_word])
+        else:
+            converted.append(word)
+    text = ' '.join(converted)
+    
+    # Collapse spaced single digits: "1 2 3" -> "123"
+    text = re.sub(r'(\d)\s+(?=\d)', r'\1', text)
+    
+    # Collapse spaced single letters (likely spelling): "k a s i" -> "kasi"
+    # But be careful not to collapse around @ or .
+    def collapse_letters(match):
+        letters = match.group(0)
+        return re.sub(r'\s+', '', letters)
+    
+    # Match sequences of single letters separated by spaces (at least 3)
+    text = re.sub(r'\b([a-z])(?:\s+[a-z]){2,}\b', collapse_letters, text)
+    
+    # Remove STT artifacts: periods between letters "k. a. s. i" -> "kasi"
+    text = re.sub(r'\b([a-z])\.\s*(?=[a-z]\b)', r'\1', text)
+    
+    # Normalize "dot" in middle of email (actual period): "john dot smith" -> "john.smith"
+    text = re.sub(r'\s+dot\s+', '.', text)
+    
+    # Clean up extra whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    return text
+
+
+def llm_extract_email(speech_text: str) -> str | None:
+    """
+    Uses Gemini to extract an email address from Twilio speech-to-text output.
+    
+    Handles messy STT like:
+    - "K. A s. I dot m. A j. J. I at gmail.com"
+    - "john at the rate gmail dot com"
+    - "my email is j o h n 1 2 3 at yahoo dot com"
+    
+    Returns:
+        Extracted email string if found, None otherwise.
+    """
+    if not speech_text or not speech_text.strip():
+        print("[LLM Email] Empty input")
+        return None
+    
+    if not model:
+        print("[LLM Email] No Gemini model available")
+        return None
+    
+    # Step 1: Deterministic pre-processing
+    normalized = _normalize_speech_for_email(speech_text)
+    print(f"[LLM Email] Normalized: '{normalized}' from '{speech_text}'")
+    
+    try:
+        # Step 2: LLM extraction with few-shot examples
+        prompt = f"""Extract the email address from this speech-to-text transcription.
+
+Rules:
+- Combine spelled letters: "k a s i" = "kasi"
+- Number words to digits: "one two three" = "123"
+- "at" or "@" = @
+- Always include full domain (.com, .net, etc.)
+
+Examples:
+1) "k a s i one two three @ gmail.com" -> kasi123@gmail.com
+2) "john 9 9 9 @ yahoo.com" -> john999@yahoo.com
+3) "m y n a m e @ outlook.com" -> myname@outlook.com
+4) "kasi.majji 9 9 9 @ gmail.com" -> kasi.majji999@gmail.com
+
+Reply with ONLY the email address, or "none" if you cannot form a valid email.
+
+Transcription: {normalized}"""
+
+        result = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.0, "max_output_tokens": 64}
+        )
+        raw_result = result.text.strip()
+        
+        print(f"[LLM Email] Raw LLM output: '{raw_result}'")
+        
+        # Step 3: Robust post-processing
+        # Strip code fences if present
+        if '```' in raw_result:
+            raw_result = re.sub(r'```[a-z]*\n?', '', raw_result)
+            raw_result = raw_result.replace('```', '').strip()
+        
+        # Remove any quotes
+        raw_result = raw_result.strip('"\'')
+        
+        # Check for explicit "none" response
+        if raw_result.lower() in ('none', 'n/a', 'invalid', 'no email'):
+            print(f"[LLM Email] LLM returned none for: '{speech_text}'")
+            return None
+        
+        # Extract email using regex (handles extra text from LLM)
+        match = _EMAIL_REGEX.search(raw_result)
+        if not match:
+            # Try after removing spaces (LLM might have added spaces)
+            raw_no_spaces = raw_result.replace(' ', '')
+            match = _EMAIL_REGEX.search(raw_no_spaces)
+        
+        if not match:
+            print(f"[LLM Email] No valid email pattern found in: '{raw_result}'")
+            return None
+        
+        email = match.group(0).lower()
+        
+        # Validate TLD
+        has_valid_tld = any(email.endswith(tld) for tld in _VALID_TLDS)
+        if not has_valid_tld:
+            print(f"[LLM Email] Rejected - invalid TLD: '{email}'")
+            return None
+        
+        print(f"[LLM Email] Extracted: '{email}'")
+        return email
+        
+    except Exception as e:
+        print(f"[LLM Email Error] Extraction failed: {e}")
         return None
 
 

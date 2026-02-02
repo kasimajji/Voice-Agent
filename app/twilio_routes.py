@@ -11,7 +11,7 @@ from .conversation import (
     get_next_troubleshooting_prompt,
     is_positive_response,
 )
-from .llm import llm_classify_appliance, llm_extract_symptoms, llm_is_appliance_related
+from .llm import llm_classify_appliance, llm_extract_symptoms, llm_is_appliance_related, llm_extract_email
 from .scheduling import find_available_slots, book_appointment, format_slot_for_speech
 from .image_service import (
     create_image_upload_token,
@@ -32,197 +32,20 @@ MAX_UPLOAD_POLL_COUNT = 10  # ~2.5 minutes with 15s pauses
 
 def extract_email_from_speech(speech_text: str) -> str | None:
     """
-    Robust email extraction from Twilio speech-to-text.
+    Extract email from Twilio speech-to-text using AI.
     
-    Handles scenarios like:
-    - "K. A s. I dot m. A j. J. I n n. N n. At gmail.com." (Twilio period artifacts + noise)
-    - "kasi dot majji at gmail dot com"
-    - "k a s i at gmail.com"
-    - "cassi at gmail dot com" (mishearing is OK - confirmation will filter)
+    Delegates to llm_extract_email for intelligent extraction that handles:
+    - Spelled out letters: "k a s i at gmail dot com"
+    - Twilio artifacts: "K. A s. I dot m. A j. J. I at gmail.com."
+    - Common phrasings: "at the rate", "dot com"
     
     Returns:
-        Extracted email string if valid pattern found, None otherwise.
+        Extracted email string if found, None otherwise.
     """
-    if not speech_text or not speech_text.strip():
-        print("[Email Extract] Empty input")
-        return None
-    
-    text = speech_text.lower().strip()
-    print(f"[Email Extract] Stage 0 - Raw input: {text}")
-    
-    # -------------------------------------------------------------------------
-    # Stage 1: Remove Twilio's period-after-single-letter artifacts
-    # "k. a. s. i." → "k a s i"
-    # Also handles "k, a, s, i" (comma artifacts)
-    # -------------------------------------------------------------------------
-    text = re.sub(r'\b([a-z])[.,]\s*', r'\1 ', text)
-    print(f"[Email Extract] Stage 1 - After removing letter periods: {text}")
-    
-    # -------------------------------------------------------------------------
-    # Stage 2: Remove common noise words that Twilio might insert
-    # "k ah yes i" → "k i" (remove filler words between letters)
-    # -------------------------------------------------------------------------
-    noise_words = [
-        r'\bah\b', r'\buh\b', r'\bum\b', r'\bhmm\b', r'\boh\b',
-        r'\byes\b', r'\bokay\b', r'\bok\b', r'\bso\b', r'\band\b',
-        r'\blike\b', r'\bthe\b', r'\bis\b', r'\bit\s+is\b',
-        r'\bthat\s+is\b', r'\bmy\s+email\s+is\b', r'\bemail\s+is\b',
-        r'\bmy\s+email\b', r'\bemail\b', r'\baddress\b',
-    ]
-    for noise in noise_words:
-        text = re.sub(noise, ' ', text, flags=re.IGNORECASE)
-    text = re.sub(r'\s+', ' ', text).strip()
-    print(f"[Email Extract] Stage 2 - After noise removal: {text}")
-    
-    # -------------------------------------------------------------------------
-    # Stage 3: Normalize @ symbol variations (must happen before domain handling)
-    # -------------------------------------------------------------------------
-    at_replacements = [
-        (r'at\s+the\s+rate\s*,?\s*', ' @ '),
-        (r'at\s+rate\s*', ' @ '),
-        (r'at\s+symbol\s*', ' @ '),
-        (r'at\s+sign\s*', ' @ '),
-        (r'\s+at\s+', ' @ '),
-        (r'^at\s+', ' @ '),  # "at gmail.com" at start
-    ]
-    for pattern, replacement in at_replacements:
-        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-    print(f"[Email Extract] Stage 3 - After @ normalization: {text}")
-    
-    # -------------------------------------------------------------------------
-    # Stage 4: Normalize common domain endings (before generic "dot" handling)
-    # -------------------------------------------------------------------------
-    domain_replacements = [
-        (r'\s*dot\s*co\s*dot\s*uk\b', '.co.uk'),
-        (r'\s*dot\s*com\b', '.com'),
-        (r'\s*dot\s*net\b', '.net'),
-        (r'\s*dot\s*org\b', '.org'),
-        (r'\s*dot\s*edu\b', '.edu'),
-        (r'\s*dot\s*co\b', '.co'),
-        (r'\s*dot\s*io\b', '.io'),
-    ]
-    for pattern, replacement in domain_replacements:
-        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-    print(f"[Email Extract] Stage 4 - After domain normalization: {text}")
-    
-    # -------------------------------------------------------------------------
-    # Stage 5: Replace standalone dot/period/point with actual dot
-    # -------------------------------------------------------------------------
-    dot_replacements = [
-        (r'\s+dot\s+', '.'),
-        (r'\s+period\s+', '.'),
-        (r'\s+point\s+', '.'),
-    ]
-    for pattern, replacement in dot_replacements:
-        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-    
-    # -------------------------------------------------------------------------
-    # Stage 6: Other symbol replacements
-    # -------------------------------------------------------------------------
-    symbol_replacements = [
-        (r'\s+underscore\s+', '_'),
-        (r'\s+under\s+score\s+', '_'),
-        (r'\s+dash\s+', '-'),
-        (r'\s+hyphen\s+', '-'),
-        (r'\s+minus\s+', '-'),
-    ]
-    for pattern, replacement in symbol_replacements:
-        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-    print(f"[Email Extract] Stage 6 - After symbol normalization: {text}")
-    
-    # -------------------------------------------------------------------------
-    # Stage 7: Fix common misheard domain names
-    # -------------------------------------------------------------------------
-    domain_corrections = [
-        (r'\bjmail\b', 'gmail'),
-        (r'\bg\s+mail\b', 'gmail'),
-        (r'\bgee\s*mail\b', 'gmail'),
-        (r'\bji\s*mail\b', 'gmail'),
-        (r'\byahoo\b', 'yahoo'),
-        (r'\byahoo\b', 'yahoo'),
-        (r'\bhotmail\b', 'hotmail'),
-        (r'\bhot\s+mail\b', 'hotmail'),
-        (r'\boutlook\b', 'outlook'),
-        (r'\bout\s+look\b', 'outlook'),
-        (r'\bicloud\b', 'icloud'),
-        (r'\bi\s+cloud\b', 'icloud'),
-    ]
-    for pattern, replacement in domain_corrections:
-        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-    print(f"[Email Extract] Stage 7 - After domain corrections: {text}")
-    
-    # -------------------------------------------------------------------------
-    # Stage 8: Handle letter-by-letter spelling
-    # Join sequences of single letters: "k a s i" → "kasi"
-    # But preserve symbols: @, ., _, -
-    # -------------------------------------------------------------------------
-    words = text.split()
-    result_parts = []
-    letter_buffer = []
-    
-    for word in words:
-        word = word.strip()
-        if not word:
-            continue
-        
-        # Check if it's a single letter (not a symbol)
-        if len(word) == 1 and word.isalpha():
-            letter_buffer.append(word)
-        else:
-            # Flush any accumulated letters first
-            if letter_buffer:
-                result_parts.append("".join(letter_buffer))
-                letter_buffer = []
-            # Add the current word/symbol
-            result_parts.append(word)
-    
-    # Flush remaining letters
-    if letter_buffer:
-        result_parts.append("".join(letter_buffer))
-    
-    # Join all parts without spaces
-    text = "".join(result_parts)
-    print(f"[Email Extract] Stage 8 - After letter joining: {text}")
-    
-    # -------------------------------------------------------------------------
-    # Stage 9: Clean up artifacts
-    # -------------------------------------------------------------------------
-    text = re.sub(r'\.+', '.', text)      # Multiple dots → single dot
-    text = re.sub(r'@+', '@', text)       # Multiple @ → single @
-    text = re.sub(r'^\.+', '', text)      # Remove leading dots
-    text = re.sub(r'\.+$', '', text)      # Remove trailing dots (before TLD)
-    text = re.sub(r'\s+', '', text)       # Remove any remaining spaces
-    text = text.strip('.,;:!?')           # Remove trailing punctuation
-    print(f"[Email Extract] Stage 9 - After cleanup: {text}")
-    
-    # -------------------------------------------------------------------------
-    # Stage 10: Reduce excessive letter repetition in local part
-    # "majjinnnn" → "majjinn" (3+ same letter → 2)
-    # Only apply to the local part (before @)
-    # -------------------------------------------------------------------------
-    if '@' in text:
-        local_part, domain_part = text.split('@', 1)
-        # Reduce 3+ consecutive same letters to 2
-        local_part = re.sub(r'([a-z])\1{2,}', r'\1\1', local_part)
-        text = f"{local_part}@{domain_part}"
-        print(f"[Email Extract] Stage 10 - After repeat reduction: {text}")
-    
-    # -------------------------------------------------------------------------
-    # Stage 11: Extract email using regex
-    # -------------------------------------------------------------------------
-    email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
-    match = re.search(email_pattern, text)
-    
-    if match:
-        result = match.group(0).lower()
-        # Final cleanup: remove any leading/trailing dots from local part
-        if result.startswith('.'):
-            result = result.lstrip('.')
-        print(f"[Email Extract] Stage 11 - Final email: {result}")
-        return result
-    
-    print(f"[Email Extract] Stage 11 - No valid email pattern found in: {text}")
-    return None
+    print(f"[Email Extract] Raw input: {speech_text}")
+    email = llm_extract_email(speech_text)
+    print(f"[Email Extract] LLM result: {email}")
+    return email
 
 
 def spell_email_for_speech(email: str) -> str:
@@ -301,7 +124,7 @@ async def voice_entry(request: Request):
     # Natural greeting - warm and friendly
     gather = response.gather(
         input="speech",
-        timeout=8,          # Give more time to respond
+        timeout=6,          # Give more time to respond
         speech_timeout="4", # Wait longer for natural pauses
         action=VOICE_CONTINUE_URL,
         method="POST"
@@ -321,17 +144,37 @@ async def voice_entry(request: Request):
 @router.post("/voice/continue")
 async def voice_continue(request: Request):
     """Handles the response after the user speaks - implements state machine."""
-    form_data = await request.form()
-    
-    call_sid = form_data.get("CallSid", "")
-    speech_result = form_data.get("SpeechResult", "")
-    
-    print(f"[Speech Received] CallSid: {call_sid}, SpeechResult: {speech_result}")
-    
-    state = get_state(call_sid)
-    response = VoiceResponse()
-    
-    speech_result = speech_result or ""
+    call_sid = ""
+    try:
+        form_data = await request.form()
+        
+        call_sid = form_data.get("CallSid", "")
+        speech_result = form_data.get("SpeechResult", "")
+        
+        print(f"[Speech Received] CallSid: {call_sid}, SpeechResult: {speech_result}")
+        
+        state = get_state(call_sid)
+        response = VoiceResponse()
+        
+        speech_result = speech_result or ""
+        
+        # Main state machine logic wrapped in inner try for graceful degradation
+        return await _handle_voice_continue(call_sid, speech_result, state, response)
+        
+    except Exception as e:
+        # Critical error handler - ensures call never crashes silently
+        print(f"[CRITICAL ERROR] CallSid: {call_sid}, Error: {type(e).__name__}: {e}")
+        response = VoiceResponse()
+        response.say(
+            "I'm sorry, we're experiencing technical difficulties. "
+            "Please call back in a few minutes. Goodbye."
+        )
+        response.hangup()
+        return Response(content=str(response), media_type="application/xml")
+
+
+async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict, response: VoiceResponse):
+    """Inner handler for voice_continue - separated for cleaner error handling."""
     
     if not speech_result.strip():
         state["no_input_attempts"] = state.get("no_input_attempts", 0) + 1
@@ -384,7 +227,7 @@ async def voice_continue(request: Request):
         
         gather = response.gather(
             input="speech",
-            timeout=8,
+            timeout=6,
             speech_timeout="4",
             action=VOICE_CONTINUE_URL,
             method="POST"
@@ -627,8 +470,9 @@ async def voice_continue(request: Request):
                 method="POST",
                 language="en-US",
                 hints="gmail.com, yahoo.com, outlook.com, hotmail.com, icloud.com, "
-                      "g mail dot com, at gmail dot com, at yahoo dot com, "
-                      "dot com, dot net, dot org, at the rate"
+                      "at gmail dot com, dot com, dot net, at the rate, "
+                      "zero, one, two, three, four, five, six, seven, eight, nine, "
+                      "0, 1, 2, 3, 4, 5, 6, 7, 8, 9"
             )
             gather.say(
                 f"Perfect{name_phrase}! I'll send you a link to upload your photo. "
@@ -686,7 +530,9 @@ async def voice_continue(request: Request):
             # Store as pending - NOT confirmed yet
             state["pending_email"] = email
             state["step"] = "confirm_email"
-            state["email_confirm_attempts"] = 0
+            # Only initialize counter on first entry, preserve across retries
+            if "email_confirm_attempts" not in state:
+                state["email_confirm_attempts"] = 0
             update_state(call_sid, state)
             
             # Spell back the email for confirmation
@@ -725,8 +571,9 @@ async def voice_continue(request: Request):
                     method="POST",
                     language="en-US",
                     hints="gmail.com, yahoo.com, outlook.com, hotmail.com, icloud.com, "
-                          "g mail dot com, at gmail dot com, at yahoo dot com, "
-                          "dot com, dot net, dot org, at the rate"
+                          "at gmail dot com, dot com, dot net, at the rate, "
+                          "zero, one, two, three, four, five, six, seven, eight, nine, "
+                          "0, 1, 2, 3, 4, 5, 6, 7, 8, 9"
                 )
                 gather.say(
                     "I'm sorry, I didn't catch a valid email address. "
@@ -843,7 +690,9 @@ async def voice_continue(request: Request):
                     method="POST",
                     language="en-US",
                     hints="gmail.com, yahoo.com, outlook.com, hotmail.com, icloud.com, "
-                          "g mail dot com, at gmail dot com, dot com, dot net, at the rate"
+                          "at gmail dot com, dot com, dot net, at the rate, "
+                          "zero, one, two, three, four, five, six, seven, eight, nine, "
+                          "0, 1, 2, 3, 4, 5, 6, 7, 8, 9"
                 )
                 gather.say(
                     "No problem, let's try again. "
@@ -1128,8 +977,34 @@ async def voice_continue(request: Request):
         # User responds to analysis - did they try the fix?
         text_lower = speech_result.lower()
         
-        if is_positive_response(speech_result) or "try" in text_lower or "helped" in text_lower or "worked" in text_lower or "fixed" in text_lower:
-            # Issue resolved
+        # Check for NEGATIVE responses FIRST - "not working", "didn't help", etc.
+        negative_patterns = ["not work", "didn't work", "doesn't work", "don't work",
+                           "didn't help", "doesn't help", "not help", "still broken",
+                           "still not", "no luck", "same issue", "same problem"]
+        is_negative = any(pattern in text_lower for pattern in negative_patterns)
+        
+        if is_negative or "schedule" in text_lower or "technician" in text_lower or "appointment" in text_lower or is_no_response(speech_result):
+            # User says it didn't work OR wants technician
+            print(f"[Tier 3] CallSid: {call_sid} - Troubleshooting didn't help, offering technician")
+            state["step"] = "collect_zip"
+            update_state(call_sid, state)
+            
+            customer_name = state.get("customer_name", "")
+            gather = response.gather(
+                input="speech",
+                timeout=8,
+                speech_timeout="4",
+                action=VOICE_CONTINUE_URL,
+                method="POST"
+            )
+            gather.say(
+                f"I'm sorry the troubleshooting didn't resolve the issue{', ' + customer_name if customer_name else ''}. "
+                "Let me schedule a technician for you. What is your ZIP code?"
+            )
+            response.redirect(VOICE_CONTINUE_URL)
+        
+        elif is_positive_response(speech_result) or "helped" in text_lower or "worked" in text_lower or "fixed" in text_lower or "better" in text_lower:
+            # Issue resolved - only if clearly positive
             state["resolved"] = True
             state["step"] = "done"
             update_state(call_sid, state)
@@ -1142,23 +1017,6 @@ async def voice_continue(request: Request):
                 "Thank you for calling Sears Home Services. Goodbye."
             )
             response.hangup()
-        
-        elif "schedule" in text_lower or "technician" in text_lower or "appointment" in text_lower or is_no_response(speech_result):
-            # User wants technician
-            state["step"] = "collect_zip"
-            update_state(call_sid, state)
-            
-            gather = response.gather(
-                input="speech",
-                timeout=5,
-                speech_timeout="3",
-                action=VOICE_CONTINUE_URL,
-                method="POST"
-            )
-            gather.say(
-                "Let me schedule a technician for you. What is your ZIP code?"
-            )
-            response.redirect(VOICE_CONTINUE_URL)
         
         else:
             # Unclear - ask again
@@ -1180,6 +1038,7 @@ async def voice_continue(request: Request):
         if len(digits) >= 5:
             zip_code = digits[:5]
             state["zip_code"] = zip_code
+            state["zip_attempts"] = 0  # Reset on success
             state["step"] = "collect_time_pref"
             update_state(call_sid, state)
             
@@ -1198,18 +1057,38 @@ async def voice_continue(request: Request):
             )
             response.redirect(VOICE_CONTINUE_URL)
         else:
-            gather = response.gather(
-                input="speech",
-                timeout=5,
-                speech_timeout="3",
-                action=VOICE_CONTINUE_URL,
-                method="POST"
-            )
-            gather.say(
-                "I'm sorry, I didn't catch a valid ZIP code. "
-                "Please say your 5-digit ZIP code."
-            )
-            response.redirect(VOICE_CONTINUE_URL)
+            # Track ZIP code attempts to prevent infinite loop
+            state["zip_attempts"] = state.get("zip_attempts", 0) + 1
+            update_state(call_sid, state)
+            
+            print(f"[Validation] ZIP attempt {state['zip_attempts']}/3, input: '{speech_result}'")
+            
+            if state["zip_attempts"] < 3:
+                gather = response.gather(
+                    input="speech",
+                    timeout=8,
+                    speech_timeout="4",
+                    action=VOICE_CONTINUE_URL,
+                    method="POST"
+                )
+                gather.say(
+                    "I'm sorry, I didn't catch a valid ZIP code. "
+                    "Please say your 5-digit ZIP code clearly, like 6 0 6 0 1."
+                )
+                response.redirect(VOICE_CONTINUE_URL)
+            else:
+                # Max attempts - end call gracefully
+                state["step"] = "done"
+                update_state(call_sid, state)
+                
+                print(f"[Validation] ZIP capture failed after 3 attempts")
+                
+                response.say(
+                    "I'm having trouble understanding the ZIP code. "
+                    "Please visit our website or call back to schedule your appointment. "
+                    "Thank you for calling Sears Home Services. Goodbye."
+                )
+                response.hangup()
     
     elif current_step == "collect_time_pref":
         text_lower = speech_result.lower()

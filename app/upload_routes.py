@@ -270,7 +270,8 @@ async def upload_image(token: str, image: UploadFile = File(...)):
         update_token_analysis(
             token=token,
             analysis_summary=analysis.get("summary", ""),
-            troubleshooting_tips=analysis.get("troubleshooting", "")
+            troubleshooting_tips=analysis.get("troubleshooting", ""),
+            is_appliance_image=is_appliance
         )
         
         # ISSUE 2.4: Show different page if not an appliance image
