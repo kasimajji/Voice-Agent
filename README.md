@@ -1,4 +1,4 @@
-# Sears Home Services - Voice AI Agent
+# Home Services - Voice AI Agent
 
 An intelligent voice-based customer support agent for home appliance troubleshooting, built with FastAPI, Twilio, and Google Gemini AI.
 
@@ -12,20 +12,7 @@ An intelligent voice-based customer support agent for home appliance troubleshoo
 
 ## 🏗️ Architecture
 
-```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   User Phone    │────▶│     Twilio      │────▶│   FastAPI App   │
-│                 │◀────│   Voice API     │◀────│                 │
-└─────────────────┘     └─────────────────┘     └────────┬────────┘
-                                                         │
-                        ┌────────────────────────────────┼────────────────────────────────┐
-                        │                                │                                │
-                        ▼                                ▼                                ▼
-               ┌─────────────────┐             ┌─────────────────┐             ┌─────────────────┐
-               │  Gemini 2.5     │             │    SQLite DB    │             │    SendGrid     │
-               │  Flash LLM      │             │  (Scheduling)   │             │    (Email)      │
-               └─────────────────┘             └─────────────────┘             └─────────────────┘
-```
+![High Level Architecture](High_level_arch.png)
 
 ## 🚀 Quick Start
 
@@ -107,52 +94,59 @@ shs-voice-ai-agent/
 └── README.md
 ```
 
-## 🎭 3-Tier Support Flow
+## 🎭 Support Tiers (Maps to Assignment Tiers 1-3)
 
-### Tier 1: Basic Troubleshooting
+### Tier 1: Conversational Troubleshooting (Assignment Tier 1)
+
+- Appliance classification via Gemini LLM
 - Common fixes (power cycle, check connections)
 - No personal info required
-- ~30 seconds
+- ~30 seconds resolution for simple issues
 
-### Tier 2: Advanced Diagnosis
-- Detailed symptom analysis
-- Model-specific troubleshooting
+### Tier 2: Structured Diagnosis (Assignment Tier 2)
+
+- Detailed symptom extraction
 - Brand and model detection
+- Model-specific troubleshooting steps
+- Escalates to Tier 3 if unresolved
 
-### Tier 3: Visual Analysis
-- Email collection for photo upload
+### Tier 3: Image-Based Analysis (Assignment Tier 3)
+
+- Email collection with robust STT handling
+- Photo upload via secure token link
 - Gemini Vision analyzes appliance images
-- Specific repair recommendations
+- Specific repair recommendations based on visual inspection
 
-### Tier 4: Technician Scheduling
-- ZIP code-based availability
-- Real-time slot booking
-- Confirmation with details
+### Tier 4: Technician Scheduling (Bonus)
+
+- ZIP code-based availability lookup
+- Real-time slot booking with confirmation
+- Fallback when AI troubleshooting insufficient
 
 ## � Service Coverage
 
 **20 technicians** across **5 metro areas** covering **10 ZIP codes**:
 
-| Metro Area | ZIP Codes |
-|------------|-----------|
-| Chicago | 60115, 60601, 60602, 60611 |
-| New York | 10001, 10002, 11201 |
-| San Francisco | 94105 |
-| Dallas | 75201 |
-| Atlanta | 30301 |
+| Metro Area    | ZIP Codes                  |
+| ------------- | -------------------------- |
+| Chicago       | 60115, 60601, 60602, 60611 |
+| New York      | 10001, 10002, 11201        |
+| San Francisco | 94105                      |
+| Dallas        | 75201                      |
+| Atlanta       | 30301                      |
 
 **Appliance Specialties**: Refrigerator, Washer, Dryer, Dishwasher, Oven, HVAC
 
 ## �🔧 API Endpoints
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check |
-| `/twilio/voice` | POST | Incoming call handler |
-| `/twilio/voice/continue` | POST | Conversation continuation |
-| `/upload/{token}` | GET | Upload page |
-| `/upload/{token}` | POST | Image upload handler |
-| `/upload/status/{call_sid}` | GET | Upload status check |
+| Endpoint                      | Method | Description               |
+| ----------------------------- | ------ | ------------------------- |
+| `/health`                   | GET    | Health check              |
+| `/twilio/voice`             | POST   | Incoming call handler     |
+| `/twilio/voice/continue`    | POST   | Conversation continuation |
+| `/upload/{token}`           | GET    | Upload page               |
+| `/upload/{token}`           | POST   | Image upload handler      |
+| `/upload/status/{call_sid}` | GET    | Upload status check       |
 
 ## 🧪 Local Development (Without Docker)
 
@@ -170,13 +164,13 @@ uvicorn app.main:app --reload --port 8000
 
 ## 📊 Database
 
-SQLite by default. For production, set `DATABASE_URL`:
+**SQLite for this submission, PostgreSQL-ready via `DATABASE_URL` environment variable.**
 
 ```env
-# PostgreSQL
+# PostgreSQL (production)
 DATABASE_URL=postgresql://user:pass@host:5432/dbname
 
-# SQLite (default)
+# SQLite (default for demo)
 DATABASE_URL=sqlite:///./voice_ai.db
 ```
 
@@ -187,17 +181,23 @@ DATABASE_URL=sqlite:///./voice_ai.db
 - Sensitive data never logged in production
 - Upload tokens expire after 24 hours
 
-## 📝 License
+## 📞 How to Review This Submission
 
-MIT License - See LICENSE file for details.
+**Live Demo Phone Number:** `[YOUR_TWILIO_NUMBER]` *(update before submission)*
 
-## 🤝 Contributing
+**Uptime Window:** Available during business hours (9 AM - 6 PM CST) or by request.
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
+### Suggested Demo Script
 
----
+1. **Call the number** and wait for greeting
+2. **Say:** "My refrigerator is making a loud noise"
+3. **Follow Tier 1-2 prompts** (appliance classification, symptoms)
+4. **When asked for email**, spell it out: "j o h n at gmail dot com"
+5. **Check email** for upload link, upload any appliance photo
+6. **Observe Tier 3** visual analysis response
+7. **Say "schedule a technician"** to test Tier 4 booking
+8. **Provide ZIP code:** 60601, 10001, or 94105 for coverage
 
-Built with ❤️ for Sears Home Services
+### Test ZIP Codes with Technician Coverage
+
+`60601`, `60602`, `60611`, `60115`, `10001`, `10002`, `11201`, `94105`, `75201`, `30301`
