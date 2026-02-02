@@ -129,7 +129,21 @@ shs-voice-ai-agent/
 - Real-time slot booking
 - Confirmation with details
 
-## 🔧 API Endpoints
+## � Service Coverage
+
+**20 technicians** across **5 metro areas** covering **10 ZIP codes**:
+
+| Metro Area | ZIP Codes |
+|------------|-----------|
+| Chicago | 60115, 60601, 60602, 60611 |
+| New York | 10001, 10002, 11201 |
+| San Francisco | 94105 |
+| Dallas | 75201 |
+| Atlanta | 30301 |
+
+**Appliance Specialties**: Refrigerator, Washer, Dryer, Dishwasher, Oven, HVAC
+
+## �🔧 API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|

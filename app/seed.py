@@ -4,34 +4,67 @@ from .models import Technician, TechnicianServiceArea, TechnicianSpecialty, Avai
 
 
 # Technician data: name, phone, email, zip_codes, specialties
+# 20 technicians covering 10 ZIP codes across 5 metro areas
 TECHNICIANS_DATA = [
-    ("Alex Martinez", "555-1001", "alex.martinez@searshomeservices.com", 
-     ["60601", "60602", "60603"], ["refrigerator", "washer"]),
-    ("Maria Chen", "555-1002", "maria.chen@searshomeservices.com", 
-     ["10001", "10002", "60601"], ["washer", "dryer"]),
-    ("John Patel", "555-1003", "john.patel@searshomeservices.com", 
-     ["60601", "10001", "90210"], ["dryer", "dishwasher", "oven"]),
-    ("Priya Singh", "555-1004", "priya.singh@searshomeservices.com", 
-     ["90210", "90211", "90212"], ["refrigerator", "hvac"]),
-    ("David Johnson", "555-1005", "david.johnson@searshomeservices.com", 
-     ["60601", "60602", "10001"], ["hvac", "oven"]),
-    ("Emily Clark", "555-1006", "emily.clark@searshomeservices.com", 
-     ["10001", "10002", "10003"], ["washer", "dryer", "dishwasher"]),
-    ("Michael Brown", "555-1007", "michael.brown@searshomeservices.com", 
-     ["90210", "60601", "77001"], ["refrigerator", "oven"]),
-    ("Sarah Lopez", "555-1008", "sarah.lopez@searshomeservices.com", 
-     ["77001", "77002", "77003"], ["washer", "dryer", "hvac"]),
-    ("Kevin Nguyen", "555-1009", "kevin.nguyen@searshomeservices.com", 
-     ["60601", "60602", "77001"], ["dishwasher", "oven", "refrigerator"]),
-    ("Laura Garcia", "555-1010", "laura.garcia@searshomeservices.com", 
-     ["10001", "90210", "77001"], ["hvac", "washer", "dryer"]),
+    # Chicago Metro (60115, 60601, 60602, 60611)
+    ("Alex Martinez", "555-1001", "alex.martinez@example.com", 
+     ["60601", "60115"], ["refrigerator", "washer"]),
+    ("Maria Chen", "555-1002", "maria.chen@example.com", 
+     ["60601", "60602"], ["washer", "dryer"]),
+    ("John Patel", "555-1003", "john.patel@example.com", 
+     ["60115", "60611"], ["refrigerator"]),
+    ("Kevin Nguyen", "555-1009", "kevin.nguyen@example.com", 
+     ["60115", "60602"], ["dishwasher", "refrigerator"]),
+    ("Laura Garcia", "555-1010", "laura.garcia@example.com", 
+     ["60601", "60611"], ["dryer", "washer"]),
+    ("Anika Sharma", "555-1012", "anika.sharma@example.com", 
+     ["60115", "60602"], ["refrigerator"]),
+    ("Omar Hassan", "555-1015", "omar.hassan@example.com", 
+     ["60601", "60611"], ["hvac", "refrigerator"]),
+    ("Chloe Taylor", "555-1016", "chloe.taylor@example.com", 
+     ["30301", "60115"], ["dishwasher"]),
+    ("Sophia Lee", "555-1020", "sophia.lee@example.com", 
+     ["10002", "60115"], ["dishwasher", "refrigerator"]),
+    
+    # New York Metro (10001, 10002, 11201)
+    ("Priya Singh", "555-1004", "priya.singh@example.com", 
+     ["10001", "10002"], ["dishwasher", "oven"]),
+    ("David Johnson", "555-1005", "david.johnson@example.com", 
+     ["10001", "11201"], ["hvac", "refrigerator"]),
+    ("Robert Wilson", "555-1011", "robert.wilson@example.com", 
+     ["10001", "11201"], ["hvac"]),
+    ("Jessica Miller", "555-1014", "jessica.miller@example.com", 
+     ["10002", "94105"], ["dryer"]),
+    ("Nina Rossi", "555-1018", "nina.rossi@example.com", 
+     ["10001", "60602"], ["dryer", "oven"]),
+    ("Ethan Walker", "555-1017", "ethan.walker@example.com", 
+     ["11201", "75201"], ["refrigerator", "washer"]),
+    
+    # San Francisco (94105)
+    ("Emily Clark", "555-1006", "emily.clark@example.com", 
+     ["60601", "94105"], ["washer"]),
+    ("Michael Brown", "555-1007", "michael.brown@example.com", 
+     ["75201", "94105"], ["dryer", "hvac"]),
+    ("Victor Kim", "555-1019", "victor.kim@example.com", 
+     ["60601", "94105"], ["hvac"]),
+    
+    # Dallas (75201)
+    ("Sarah Lopez", "555-1008", "sarah.lopez@example.com", 
+     ["30301", "75201"], ["oven"]),
+    ("Daniel Evans", "555-1013", "daniel.evans@example.com", 
+     ["30301", "75201"], ["oven", "washer"]),
 ]
 
-# ZIP codes covered: 60601, 60602, 60603, 10001, 10002, 10003, 90210, 90211, 90212, 77001, 77002, 77003
+# ZIP codes covered (10 total across 5 metro areas):
+# - Chicago: 60115, 60601, 60602, 60611
+# - New York: 10001, 10002, 11201
+# - San Francisco: 94105
+# - Dallas: 75201
+# - Atlanta: 30301
 
 
 def seed_data():
-    """Seed database with 10 technicians, service areas, specialties, and availability slots."""
+    """Seed database with 20 technicians, service areas, specialties, and availability slots."""
     db = SessionLocal()
     try:
         if db.query(Technician).first():

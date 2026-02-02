@@ -155,28 +155,61 @@ Single instance  ──────▶         Azure Container Apps (auto-scale)
 
 ---
 
-## 6. Security Design
+## 6. Data Model
 
-### 6.1 Secrets Management
+### 6.1 Seed Data Overview
+
+| Entity | Count | Description |
+|--------|-------|-------------|
+| Technicians | 20 | Service professionals with contact info |
+| Service Areas | 40 | Technician-to-ZIP mappings |
+| Specialties | 32 | Technician-to-appliance mappings |
+| Availability Slots | 400 | 10 days × 2 slots × 20 technicians |
+
+### 6.2 Geographic Coverage
+
+| Metro Area | ZIP Codes | Technicians |
+|------------|-----------|-------------|
+| Chicago | 60115, 60601, 60602, 60611 | 9 |
+| New York | 10001, 10002, 11201 | 6 |
+| San Francisco | 94105 | 3 |
+| Dallas | 75201 | 4 |
+| Atlanta | 30301 | 3 |
+
+### 6.3 Appliance Coverage
+
+All 6 major appliance categories covered:
+- **Refrigerator**: 9 technicians
+- **Washer**: 7 technicians
+- **Dryer**: 6 technicians
+- **Dishwasher**: 5 technicians
+- **Oven**: 5 technicians
+- **HVAC**: 6 technicians
+
+---
+
+## 7. Security Design
+
+### 7.1 Secrets Management
 - All API keys via environment variables
 - `.env` files excluded from Docker images
 - No secrets in source code or logs
 
-### 6.2 Data Protection
+### 7.2 Data Protection
 - Upload tokens expire after 24 hours
 - No PII stored beyond session
 - HTTPS enforced for all endpoints
 
-### 6.3 Input Validation
+### 7.3 Input Validation
 - Email regex validation + TLD whitelist
 - ZIP code format validation
 - Speech input sanitization before LLM
 
 ---
 
-## 7. Error Handling Strategy
+## 8. Error Handling Strategy
 
-### 7.1 Graceful Degradation
+### 8.1 Graceful Degradation
 
 | Failure | Fallback |
 |---------|----------|
@@ -185,14 +218,14 @@ Single instance  ──────▶         Azure Container Apps (auto-scale)
 | Email send fails | Log and continue flow |
 | Database error | In-memory fallback for critical data |
 
-### 7.2 Retry Logic
+### 8.2 Retry Logic
 - Email confirmation: 3 attempts before fallback
 - ZIP code collection: 3 attempts before agent transfer
 - Image upload polling: 3 minutes timeout
 
 ---
 
-## 8. Future Enhancements
+## 9. Future Enhancements
 
 ### Phase 2 (Planned)
 - [ ] Multi-language support (Spanish, French)
@@ -207,7 +240,7 @@ Single instance  ──────▶         Azure Container Apps (auto-scale)
 
 ---
 
-## 9. Testing Strategy
+## 10. Testing Strategy
 
 | Level | Coverage | Tools |
 |-------|----------|-------|
@@ -217,7 +250,7 @@ Single instance  ──────▶         Azure Container Apps (auto-scale)
 
 ---
 
-## 10. Conclusion
+## 11. Conclusion
 
 This architecture prioritizes:
 1. **Simplicity**: Minimal moving parts for reliability
