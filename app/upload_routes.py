@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse
 
+from html import escape as html_escape
 from .image_service import (
     get_upload_token,
     is_token_valid,
@@ -47,7 +48,7 @@ async def upload_form(token: str):
             return HTMLResponse(content=error_page("Link Expired",
                 "This upload link has expired. Please call us again to get a new link."), status_code=410)
     
-    appliance_text = f" for your {upload_token.appliance_type}" if upload_token.appliance_type else ""
+    appliance_text = f" for your {html_escape(upload_token.appliance_type)}" if upload_token.appliance_type else ""
     
     return HTMLResponse(content=f"""
 <!DOCTYPE html>
@@ -353,7 +354,8 @@ def not_appliance_page(appliance_type: str, summary: str) -> str:
     ISSUE 2.4: Generate a page for when uploaded image is NOT an appliance.
     Prompts user to upload a correct image.
     """
-    appliance_text = appliance_type or "appliance"
+    appliance_text = html_escape(appliance_type) if appliance_type else "appliance"
+    summary = html_escape(summary) if summary else ""
     
     return f"""
 <!DOCTYPE html>
@@ -471,7 +473,9 @@ def not_appliance_page(appliance_type: str, summary: str) -> str:
 
 def success_page(appliance_type: str, summary: str, troubleshooting: str) -> str:
     """Generate a success HTML page with analysis results."""
-    appliance_text = f" - {appliance_type.title()}" if appliance_type else ""
+    appliance_text = f" - {html_escape(appliance_type.title())}" if appliance_type else ""
+    summary = html_escape(summary) if summary else ""
+    troubleshooting = html_escape(troubleshooting) if troubleshooting else ""
     
     troubleshooting_html = ""
     if troubleshooting:

@@ -6,6 +6,8 @@ python-multipart==0.0.6
 twilio==8.10.0
 google-generativeai==0.3.2
 sqlalchemy==2.0.25
+pymysql==1.1.0
+cryptography==41.0.7
 sendgrid==6.11.0
 aiofiles==23.2.1
 httpx==0.26.0

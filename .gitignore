@@ -50,3 +50,23 @@ Thumbs.db
 
 # Uploaded images (Tier 3)
 uploads/
+
+# Docker
+mysql_data/
+.docker/
+
+# Generated documentation (keep .md versions)
+*.docx
+
+# Test files
+test_*.py
+
+# Local setup scripts (not needed for Docker)
+setup_local_mysql.sql
+setup_workbench.sql
+verify_setup.sh
+
+# Temporary files
+*.tmp
+*.temp
+*.bak

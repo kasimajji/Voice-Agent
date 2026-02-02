@@ -26,7 +26,7 @@ TECHNICIANS_DATA = [
     ("Sophia Lee", "555-1020", "sophia.lee@example.com", 
      ["10002", "60115"], ["dishwasher", "refrigerator"]),
     
-    # New York Metro (10001, 10002, 11201)
+    # New York Metro (10001, 10002, 11201) + cross-region coverage
     ("Priya Singh", "555-1004", "priya.singh@example.com", 
      ["10001", "10002"], ["dishwasher", "oven"]),
     ("David Johnson", "555-1005", "david.johnson@example.com", 
@@ -34,11 +34,11 @@ TECHNICIANS_DATA = [
     ("Robert Wilson", "555-1011", "robert.wilson@example.com", 
      ["10001", "11201"], ["hvac"]),
     ("Jessica Miller", "555-1014", "jessica.miller@example.com", 
-     ["10002", "94105"], ["dryer"]),
+     ["10002", "94105"], ["dryer"]),  # NY + SF coverage
     ("Nina Rossi", "555-1018", "nina.rossi@example.com", 
-     ["10001", "60602"], ["dryer", "oven"]),
+     ["10001", "60602"], ["dryer", "oven"]),  # NY + Chicago coverage
     ("Ethan Walker", "555-1017", "ethan.walker@example.com", 
-     ["11201", "75201"], ["refrigerator", "washer"]),
+     ["11201", "75201"], ["refrigerator", "washer"]),  # NY + Dallas coverage
     
     # San Francisco (94105)
     ("Emily Clark", "555-1006", "emily.clark@example.com", 

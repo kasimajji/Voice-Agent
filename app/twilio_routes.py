@@ -127,7 +127,8 @@ async def voice_entry(request: Request):
         timeout=6,          # Give more time to respond
         speech_timeout="4", # Wait longer for natural pauses
         action=VOICE_CONTINUE_URL,
-        method="POST"
+        method="POST",
+        bargeIn=False
     )
     gather.say(
         "Hi there! Thanks for calling Sears Home Services. "
@@ -186,7 +187,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 timeout=5,
                 speech_timeout="3",
                 action=VOICE_CONTINUE_URL,
-                method="POST"
+                method="POST",
+            bargeIn=False
             )
             gather.say(
                 "I'm sorry, I didn't hear anything. "
@@ -210,6 +212,11 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
     if current_step == "greet_ask_name":
         # Extract name from speech (simple extraction - take the main content)
         customer_name = speech_result.strip()
+        
+        # Remove leading filler words (uh, um, yeah, etc.)
+        filler_pattern = r'^(uh,?\s*|um,?\s*|yeah,?\s*|yes,?\s*|so,?\s*|well,?\s*|okay,?\s*|ok,?\s*)+'
+        customer_name = re.sub(filler_pattern, '', customer_name, flags=re.IGNORECASE).strip()
+        
         # Clean up common prefixes
         for prefix in ["my name is ", "i'm ", "this is ", "it's ", "i am ", "hey ", "hi "]:
             if customer_name.lower().startswith(prefix):
@@ -230,7 +237,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             timeout=6,
             speech_timeout="4",
             action=VOICE_CONTINUE_URL,
-            method="POST"
+            method="POST",
+        bargeIn=False
         )
         gather.say(
             f"Nice to meet you, {customer_name}! How are you doing today?"
@@ -250,7 +258,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             timeout=10,
             speech_timeout="5",
             action=VOICE_CONTINUE_URL,
-            method="POST"
+            method="POST",
+        bargeIn=False
         )
         gather.say(
             f"That's great to hear! "
@@ -292,7 +301,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 timeout=10,
                 speech_timeout="5",
                 action=VOICE_CONTINUE_URL,
-                method="POST"
+                method="POST",
+            bargeIn=False
             )
             gather.say(
                 f"Got it{name_phrase}! So you're having trouble with your {appliance}. "
@@ -313,7 +323,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                     timeout=10,
                     speech_timeout="5",
                     action=VOICE_CONTINUE_URL,
-                    method="POST"
+                    method="POST",
+                bargeIn=False
                 )
                 gather.say(
                     f"I'm sorry{name_phrase}, I didn't quite catch that. "
@@ -334,7 +345,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                     timeout=10,
                     speech_timeout="5",
                     action=VOICE_CONTINUE_URL,
-                    method="POST"
+                    method="POST",
+                bargeIn=False
                 )
                 gather.say(
                     f"No worries{name_phrase}! Let's figure this out together. "
@@ -370,7 +382,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 timeout=15,
                 speech_timeout="5",
                 action=VOICE_CONTINUE_URL,
-                method="POST"
+                method="POST",
+            bargeIn=False
             )
             # Use the LLM-generated symptom summary in the response
             summary = state["symptom_summary"]
@@ -417,7 +430,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                     timeout=15,
                     speech_timeout="5",
                     action=VOICE_CONTINUE_URL,
-                    method="POST"
+                    method="POST",
+                bargeIn=False
                 )
                 gather.say(
                     f"Alright{name_phrase}, no problem. Let's try something else. {prompt} "
@@ -436,7 +450,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                     timeout=10,
                     speech_timeout="5",
                     action=VOICE_CONTINUE_URL,
-                    method="POST"
+                    method="POST",
+                bargeIn=False
                 )
                 gather.say(
                     f"I understand{name_phrase}, sometimes these issues need a closer look. "
@@ -468,6 +483,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 speech_timeout="5",
                 action=VOICE_CONTINUE_URL,
                 method="POST",
+                bargeIn=False,
                 language="en-US",
                 hints="gmail.com, yahoo.com, outlook.com, hotmail.com, icloud.com, "
                       "at gmail dot com, dot com, dot net, at the rate, "
@@ -493,7 +509,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 timeout=10,
                 speech_timeout="5",
                 action=VOICE_CONTINUE_URL,
-                method="POST"
+                method="POST",
+            bargeIn=False
             )
             gather.say(
                 f"Absolutely{name_phrase}! Let me help you schedule a technician visit. "
@@ -508,7 +525,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 timeout=10,
                 speech_timeout="5",
                 action=VOICE_CONTINUE_URL,
-                method="POST"
+                method="POST",
+            bargeIn=False
             )
             gather.say(
                 "I'm sorry, I didn't catch that. "
@@ -547,6 +565,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 speech_timeout="3",
                 action=VOICE_CONTINUE_URL,
                 method="POST",
+                bargeIn=False,
                 language="en-US"
             )
             gather.say(
@@ -569,6 +588,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                     speech_timeout="4",  # More pause tolerance
                     action=VOICE_CONTINUE_URL,
                     method="POST",
+                    bargeIn=False,
                     language="en-US",
                     hints="gmail.com, yahoo.com, outlook.com, hotmail.com, icloud.com, "
                           "at gmail dot com, dot com, dot net, at the rate, "
@@ -593,6 +613,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                     speech_timeout="3",
                     action=VOICE_CONTINUE_URL,
                     method="POST",
+                    bargeIn=False,
                     language="en-US"
                 )
                 gather.say(
@@ -640,7 +661,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                     timeout=15,  # Longer timeout to give user time
                     speech_timeout="3",
                     action=VOICE_CONTINUE_URL,
-                    method="POST"
+                    method="POST",
+                bargeIn=False
                 )
                 gather.say(
                     f"I've sent an upload link to your email. "
@@ -661,7 +683,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                     timeout=5,
                     speech_timeout="3",
                     action=VOICE_CONTINUE_URL,
-                    method="POST"
+                    method="POST",
+                bargeIn=False
                 )
                 gather.say(
                     "I'm sorry, there was an issue sending the upload link. "
@@ -688,6 +711,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                     speech_timeout="4",
                     action=VOICE_CONTINUE_URL,
                     method="POST",
+                    bargeIn=False,
                     language="en-US",
                     hints="gmail.com, yahoo.com, outlook.com, hotmail.com, icloud.com, "
                           "at gmail dot com, dot com, dot net, at the rate, "
@@ -712,6 +736,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                     speech_timeout="3",
                     action=VOICE_CONTINUE_URL,
                     method="POST",
+                    bargeIn=False,
                     language="en-US"
                 )
                 gather.say(
@@ -729,6 +754,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 speech_timeout="3",
                 action=VOICE_CONTINUE_URL,
                 method="POST",
+                bargeIn=False,
                 language="en-US"
             )
             spelled_email = spell_email_for_speech(pending_email) if pending_email else "the email"
@@ -769,7 +795,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                     timeout=10,
                     speech_timeout="3",
                     action=VOICE_CONTINUE_URL,
-                    method="POST"
+                    method="POST",
+                bargeIn=False
                 )
                 gather.say(
                     "I see your image was received. Just a moment while I analyze it. "
@@ -790,7 +817,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                         timeout=15,
                         speech_timeout="3",
                         action=VOICE_CONTINUE_URL,
-                        method="POST"
+                        method="POST",
+                    bargeIn=False
                     )
                     gather.say(
                         "I don't see the upload yet. Please check your email for the link. "
@@ -807,7 +835,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                         timeout=5,
                         speech_timeout="3",
                         action=VOICE_CONTINUE_URL,
-                        method="POST"
+                        method="POST",
+                    bargeIn=False
                     )
                     gather.say(
                         "We've been waiting a while. Let's continue with scheduling a technician. "
@@ -829,7 +858,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 timeout=5,
                 speech_timeout="3",
                 action=VOICE_CONTINUE_URL,
-                method="POST"
+                method="POST",
+            bargeIn=False
             )
             gather.say(
                 "No problem. You can still upload the photo later using the email link. "
@@ -858,7 +888,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                         timeout=15,
                         speech_timeout="3",
                         action=VOICE_CONTINUE_URL,
-                        method="POST"
+                        method="POST",
+                    bargeIn=False
                     )
                     gather.say(
                         "I'm still here. Let me know once you've uploaded the image, "
@@ -875,7 +906,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                         timeout=5,
                         speech_timeout="3",
                         action=VOICE_CONTINUE_URL,
-                        method="POST"
+                        method="POST",
+                    bargeIn=False
                     )
                     gather.say(
                         "We've been waiting a while. Let's continue with scheduling. "
@@ -901,7 +933,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 timeout=5,
                 speech_timeout="3",
                 action=VOICE_CONTINUE_URL,
-                method="POST"
+                method="POST",
+            bargeIn=False
             )
             gather.say(
                 "I'm sorry, the image analysis isn't available yet. "
@@ -923,7 +956,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 timeout=15,
                 speech_timeout="3",
                 action=VOICE_CONTINUE_URL,
-                method="POST"
+                method="POST",
+            bargeIn=False
             )
             gather.say(
                 f"The image doesn't appear to show the {appliance}. "
@@ -958,7 +992,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 timeout=5,
                 speech_timeout="3",
                 action=VOICE_CONTINUE_URL,
-                method="POST"
+                method="POST",
+            bargeIn=False
             )
             
             if tips:
@@ -995,7 +1030,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 timeout=8,
                 speech_timeout="4",
                 action=VOICE_CONTINUE_URL,
-                method="POST"
+                method="POST",
+            bargeIn=False
             )
             gather.say(
                 f"I'm sorry the troubleshooting didn't resolve the issue{', ' + customer_name if customer_name else ''}. "
@@ -1025,7 +1061,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 timeout=5,
                 speech_timeout="3",
                 action=VOICE_CONTINUE_URL,
-                method="POST"
+                method="POST",
+            bargeIn=False
             )
             gather.say(
                 "Would you like to try the suggested fix, or would you prefer to schedule a technician?"
@@ -1049,7 +1086,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 timeout=5,
                 speech_timeout="3",
                 action=VOICE_CONTINUE_URL,
-                method="POST"
+                method="POST",
+            bargeIn=False
             )
             gather.say(
                 f"Got it, ZIP code {' '.join(zip_code)}. "
@@ -1069,7 +1107,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                     timeout=8,
                     speech_timeout="4",
                     action=VOICE_CONTINUE_URL,
-                    method="POST"
+                    method="POST",
+                bargeIn=False
                 )
                 gather.say(
                     "I'm sorry, I didn't catch a valid ZIP code. "
@@ -1137,7 +1176,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 timeout=5,
                 speech_timeout="3",
                 action=VOICE_CONTINUE_URL,
-                method="POST"
+                method="POST",
+            bargeIn=False
             )
             gather.say(
                 slot_speech +
@@ -1219,7 +1259,8 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 timeout=5,
                 speech_timeout="3",
                 action=VOICE_CONTINUE_URL,
-                method="POST"
+                method="POST",
+            bargeIn=False
             )
             gather.say(
                 "I'm sorry, I didn't understand your selection. "

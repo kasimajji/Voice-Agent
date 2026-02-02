@@ -7,7 +7,7 @@ def get_state(call_id: str) -> dict:
         return sessions[call_id]
     
     initial_state = {
-        "step": "ask_appliance",
+        "step": "greet_ask_name",
         "appliance_type": None,
         "symptoms": None,
         "symptom_summary": None,

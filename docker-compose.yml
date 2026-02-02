@@ -1,6 +1,28 @@
 version: '3.8'
 
 services:
+  db:
+    image: mysql:8.0
+    container_name: shs-voice-ai-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: voice_ai
+      MYSQL_USER: voice_ai_user
+      MYSQL_PASSWORD: ${DB_PASSWORD:-voiceaipassword}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD:-rootpassword}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - voice-ai-network
+    restart: unless-stopped
+
   voice-ai:
     build: .
     container_name: shs-voice-ai
@@ -9,8 +31,25 @@ services:
     env_file:
       - app/.env
     environment:
-      - DATABASE_URL=sqlite:////app/data/voice_ai.db
+      # Database connection for Docker (uses service name as host)
+      - DB_HOST=db
+      - DB_PORT=3306
+      - DB_USER=voice_ai_user
+      - DB_PASSWORD=${DB_PASSWORD:-voiceaipassword}
+      - DB_NAME=voice_ai
     volumes:
-      - ./data:/app/data
       - ./uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - voice-ai-network
     restart: unless-stopped
+
+networks:
+  voice-ai-network:
+    driver: bridge
+
+volumes:
+  mysql_data:
+    driver: local

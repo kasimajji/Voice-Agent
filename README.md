@@ -43,17 +43,34 @@ GOOGLE_API_KEY=your_gemini_api_key
 APP_BASE_URL=https://your-domain.ngrok-free.app
 SENDGRID_API_KEY=your_sendgrid_key  # Optional
 SENDGRID_FROM_EMAIL=noreply@yourdomain.com  # Optional
+
+# MySQL credentials (for local development)
+# Docker will override DB_HOST automatically
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=voice_ai_user
+DB_PASSWORD=voiceaipassword
+DB_NAME=voice_ai
 ```
 
-### 3. Launch with Docker
+### 3. Launch with Docker (One Command!)
 
 ```bash
-# Build and start
+# Build and start both MySQL and the app
 docker-compose up --build
 
 # Or run in background
 docker-compose up -d --build
+
+# The setup will:
+# ✅ Start MySQL 8.0 container
+# ✅ Initialize database schema automatically
+# ✅ Seed 20 technicians with availability
+# ✅ Start the FastAPI app
+# ✅ Handle 4+ simultaneous voice calls
 ```
+
+**That's it!** The database is fully configured and ready for voice interactions.
 
 ### 4. Expose with ngrok (Development)
 
@@ -164,15 +181,30 @@ uvicorn app.main:app --reload --port 8000
 
 ## 📊 Database
 
-**SQLite for this submission, PostgreSQL-ready via `DATABASE_URL` environment variable.**
+**MySQL 8.0** with automatic initialization and connection retry logic.
 
-```env
-# PostgreSQL (production)
-DATABASE_URL=postgresql://user:pass@host:5432/dbname
+### Docker Setup (Recommended)
+- MySQL runs in a separate container
+- Database schema auto-created via `init.sql`
+- Persistent volume for data retention
+- Health checks ensure MySQL is ready before app starts
 
-# SQLite (default for demo)
-DATABASE_URL=sqlite:///./voice_ai.db
+### Local Development
+```bash
+# Make sure MySQL is running locally
+# Update app/.env with your local credentials:
+DB_HOST=localhost
+DB_USER=your_mysql_user
+DB_PASSWORD=your_mysql_password
+
+# Run the app
+uvicorn app.main:app --reload --port 8000
 ```
+
+### Connection Resilience
+- Automatic retry mechanism (5 attempts with 2s delay)
+- Pool pre-ping to verify connections
+- Connection recycling every hour
 
 ## 🔒 Security Notes
 

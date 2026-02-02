@@ -19,17 +19,7 @@ def find_available_slots(zip_code: str, appliance_type: str, time_preference: st
     """
     db = SessionLocal()
     try:
-        # Get technician IDs that serve this ZIP code
-        tech_ids_by_zip = select(TechnicianServiceArea.technician_id).where(
-            TechnicianServiceArea.zip_code == zip_code
-        ).scalar_subquery()
-        
-        # Get technician IDs that specialize in this appliance
-        tech_ids_by_specialty = select(TechnicianSpecialty.technician_id).where(
-            TechnicianSpecialty.appliance_type == appliance_type
-        ).scalar_subquery()
-        
-        # Query available slots
+        # Query available slots matching ZIP code and appliance specialty
         query = (
             db.query(AvailabilitySlot)
             .join(Technician)
