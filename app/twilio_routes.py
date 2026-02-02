@@ -11,7 +11,7 @@ from .conversation import (
     get_next_troubleshooting_prompt,
     is_positive_response,
 )
-from .llm import llm_classify_appliance, llm_extract_symptoms
+from .llm import llm_classify_appliance, llm_extract_symptoms, llm_is_appliance_related
 from .scheduling import find_available_slots, book_appointment, format_slot_for_speech
 from .image_service import (
     create_image_upload_token,
@@ -292,27 +292,24 @@ async def voice_entry(request: Request):
     print(f"[Incoming Call] CallSid: {call_sid}, From: {from_number}, To: {to_number}")
     
     state = get_state(call_sid)
-    state["step"] = "ask_appliance"
+    state["step"] = "greet_ask_name"
     state["customer_phone"] = from_number
     update_state(call_sid, state)
     
     response = VoiceResponse()
     
-    response.say(
-        "Hi, this is the Sears Home Services assistant. "
-        "Thanks for calling. I'll help you troubleshoot your appliance issue."
-    )
-    
+    # Natural greeting - warm and friendly
     gather = response.gather(
         input="speech",
-        timeout=5,
-        speech_timeout="3",
+        timeout=8,          # Give more time to respond
+        speech_timeout="4", # Wait longer for natural pauses
         action=VOICE_CONTINUE_URL,
         method="POST"
     )
     gather.say(
-        "To get started, what appliance are you calling about? "
-        "For example, a washer, dryer, or refrigerator, dishwasher, oven, or HVAC system."
+        "Hi there! Thanks for calling Sears Home Services. "
+        "My name is Sam, and I'll be helping you today. "
+        "May I have your name, please?"
     )
     
     response.redirect(VOICE_CONTINUE_URL)
@@ -363,64 +360,150 @@ async def voice_continue(request: Request):
         
         return Response(content=str(response), media_type="application/xml")
     
-    current_step = state.get("step", "ask_appliance")
+    current_step = state.get("step", "greet_ask_name")
     
-    if current_step == "ask_appliance":
-        # Try Gemini LLM first, fall back to keyword-based inference
-        appliance = llm_classify_appliance(speech_result)
-        if not appliance:
-            appliance = infer_appliance_type(speech_result)
-            if appliance:
-                print(f"[Fallback] Using keyword-based appliance detection: {appliance}")
+    # ==================== NATURAL CONVERSATION FLOW ====================
+    
+    if current_step == "greet_ask_name":
+        # Extract name from speech (simple extraction - take the main content)
+        customer_name = speech_result.strip()
+        # Clean up common prefixes
+        for prefix in ["my name is ", "i'm ", "this is ", "it's ", "i am ", "hey ", "hi "]:
+            if customer_name.lower().startswith(prefix):
+                customer_name = customer_name[len(prefix):]
+                break
+        # Take first word/name if multiple words
+        customer_name = customer_name.split()[0] if customer_name.split() else "there"
+        customer_name = customer_name.strip(".,!?").title()
+        
+        state["customer_name"] = customer_name
+        state["step"] = "ask_how_are_you"
+        update_state(call_sid, state)
+        
+        print(f"[Conversation] CallSid: {call_sid}, Customer name: {customer_name}")
+        
+        gather = response.gather(
+            input="speech",
+            timeout=8,
+            speech_timeout="4",
+            action=VOICE_CONTINUE_URL,
+            method="POST"
+        )
+        gather.say(
+            f"Nice to meet you, {customer_name}! How are you doing today?"
+        )
+        response.redirect(VOICE_CONTINUE_URL)
+    
+    elif current_step == "ask_how_are_you":
+        # Acknowledge their response warmly, then transition to help
+        customer_name = state.get("customer_name", "there")
+        state["step"] = "ask_appliance"
+        update_state(call_sid, state)
+        
+        print(f"[Conversation] CallSid: {call_sid}, How are you response: {speech_result}")
+        
+        gather = response.gather(
+            input="speech",
+            timeout=10,
+            speech_timeout="5",
+            action=VOICE_CONTINUE_URL,
+            method="POST"
+        )
+        gather.say(
+            f"That's great to hear! "
+            f"So {customer_name}, what can I help you with today? "
+            "Are you having an issue with an appliance like a washer, dryer, refrigerator, dishwasher, oven, or HVAC system?"
+        )
+        response.redirect(VOICE_CONTINUE_URL)
+    
+    # ==================== APPLIANCE & TROUBLESHOOTING FLOW ====================
+    
+    elif current_step == "ask_appliance":
+        # First validate if the input is appliance-related
+        is_related = llm_is_appliance_related(speech_result)
+        
+        appliance = None
+        if is_related:
+            # Try Gemini LLM first, fall back to keyword-based inference
+            appliance = llm_classify_appliance(speech_result)
+            if not appliance:
+                appliance = infer_appliance_type(speech_result)
+                if appliance:
+                    print(f"[Fallback] Using keyword-based appliance detection: {appliance}")
+        else:
+            print(f"[Validation] Input not appliance-related: '{speech_result}'")
+        
+        customer_name = state.get("customer_name", "")
+        name_phrase = f", {customer_name}" if customer_name else ""
         
         if appliance:
             state["appliance_type"] = appliance
             state["step"] = "ask_symptoms"
-            state["no_match_attempts"] = 0  # Reset on success
+            state["appliance_attempts"] = 0  # Reset on success
             update_state(call_sid, state)
             
             print(f"[State Update] CallSid: {call_sid}, Appliance: {appliance}")
             
             gather = response.gather(
                 input="speech",
-                timeout=5,
-                speech_timeout="3",
+                timeout=10,
+                speech_timeout="5",
                 action=VOICE_CONTINUE_URL,
                 method="POST"
             )
             gather.say(
-                f"Thanks. I heard {appliance}. "
-                f"Now, can you briefly describe what's going wrong with your {appliance}?"
+                f"Got it{name_phrase}! So you're having trouble with your {appliance}. "
+                f"Can you tell me a bit more about what's happening? "
+                "For example, any error codes, strange noises, or specific issues you've noticed?"
             )
             response.redirect(VOICE_CONTINUE_URL)
         else:
-            state["no_match_attempts"] = state.get("no_match_attempts", 0) + 1
+            state["appliance_attempts"] = state.get("appliance_attempts", 0) + 1
             update_state(call_sid, state)
             
-            if state["no_match_attempts"] <= 2:
+            print(f"[Validation] Appliance attempt {state['appliance_attempts']}/2")
+            
+            if state["appliance_attempts"] < 2:
+                # Retry - ask again naturally
                 gather = response.gather(
                     input="speech",
-                    timeout=5,
-                    speech_timeout="3",
+                    timeout=10,
+                    speech_timeout="5",
                     action=VOICE_CONTINUE_URL,
                     method="POST"
                 )
                 gather.say(
-                    "I'm sorry, I didn't catch what appliance you're calling about. "
-                    "Please say something like washer, dryer, refrigerator, dishwasher, oven, or HVAC system."
+                    f"I'm sorry{name_phrase}, I didn't quite catch that. "
+                    "Which appliance is giving you trouble? "
+                    "It could be a washer, dryer, fridge, dishwasher, oven, or your heating and cooling system."
                 )
                 response.redirect(VOICE_CONTINUE_URL)
             else:
-                response.say(
-                    "I'm still having trouble understanding the appliance type, "
-                    "so I'll end the call here. "
-                    "You can also schedule service online at any time. Goodbye."
+                # After 2 failed attempts, move to troubleshooting with unknown appliance
+                state["appliance_type"] = "appliance"  # Generic fallback
+                state["step"] = "ask_symptoms"
+                update_state(call_sid, state)
+                
+                print(f"[Validation] Max attempts reached, proceeding with generic appliance")
+                
+                gather = response.gather(
+                    input="speech",
+                    timeout=10,
+                    speech_timeout="5",
+                    action=VOICE_CONTINUE_URL,
+                    method="POST"
                 )
-                response.hangup()
+                gather.say(
+                    f"No worries{name_phrase}! Let's figure this out together. "
+                    "Can you describe what's going wrong? Tell me about the problem you're experiencing."
+                )
+                response.redirect(VOICE_CONTINUE_URL)
     
     elif current_step == "ask_symptoms":
         # Store raw symptoms
         state["symptoms"] = speech_result
+        customer_name = state.get("customer_name", "")
+        name_phrase = f", {customer_name}" if customer_name else ""
         
         # Use Gemini to extract structured symptom information
         extracted = llm_extract_symptoms(speech_result)
@@ -441,29 +524,33 @@ async def voice_continue(request: Request):
         if prompt:
             gather = response.gather(
                 input="speech",
-                timeout=5,
-                speech_timeout="3",
+                timeout=15,
+                speech_timeout="5",
                 action=VOICE_CONTINUE_URL,
                 method="POST"
             )
             # Use the LLM-generated symptom summary in the response
             summary = state["symptom_summary"]
             gather.say(
-                f"Thanks. It sounds like you're experiencing: {summary}. "
-                f"Let's try a quick check together. {prompt} "
-                "After you've checked that, just say 'yes' if it helped or 'no' if the problem is still there."
+                f"Okay{name_phrase}, I understand. {summary}. "
+                f"Let me help you with a quick troubleshooting step. {prompt} "
+                "Take your time, and when you're ready, just say 'yes' if that helped or 'no' if you're still having the issue."
             )
             response.redirect(VOICE_CONTINUE_URL)
         else:
             state["step"] = "done"
             update_state(call_sid, state)
             response.say(
-                "I'm sorry, I don't have troubleshooting steps for that appliance yet. "
-                "Please call back to speak with a technician. Goodbye."
+                f"I'm sorry{name_phrase}, I don't have specific troubleshooting steps for that issue yet. "
+                "But don't worry, our technicians can definitely help. "
+                "Please call back to speak with a specialist. Thank you for calling Sears Home Services. Goodbye!"
             )
             response.hangup()
     
     elif current_step == "troubleshoot":
+        customer_name = state.get("customer_name", "")
+        name_phrase = f", {customer_name}" if customer_name else ""
+        
         if is_positive_response(speech_result):
             state["resolved"] = True
             state["step"] = "done"
@@ -472,9 +559,9 @@ async def voice_continue(request: Request):
             print(f"[Call Resolved] CallSid: {call_sid}")
             
             response.say(
-                "Great, I'm glad that seemed to help! "
-                "If the issue comes back, you can always call us again. "
-                "Thank you for calling Sears Home Services. Goodbye."
+                f"Wonderful{name_phrase}! I'm so glad that worked! "
+                "If you ever have any other issues, don't hesitate to give us a call. "
+                "Have a great day, and thank you for choosing Sears Home Services. Take care!"
             )
             response.hangup()
         else:
@@ -484,14 +571,14 @@ async def voice_continue(request: Request):
             if prompt:
                 gather = response.gather(
                     input="speech",
-                    timeout=5,
-                    speech_timeout="3",
+                    timeout=15,
+                    speech_timeout="5",
                     action=VOICE_CONTINUE_URL,
                     method="POST"
                 )
                 gather.say(
-                    f"Okay, let's try another check. {prompt} "
-                    "After you've checked that, just say 'yes' if it helped or 'no' if the problem is still there."
+                    f"Alright{name_phrase}, no problem. Let's try something else. {prompt} "
+                    "Again, take your time and let me know if that helps."
                 )
                 response.redirect(VOICE_CONTINUE_URL)
             else:
@@ -503,23 +590,25 @@ async def voice_continue(request: Request):
                 
                 gather = response.gather(
                     input="speech",
-                    timeout=5,
-                    speech_timeout="3",
+                    timeout=10,
+                    speech_timeout="5",
                     action=VOICE_CONTINUE_URL,
                     method="POST"
                 )
                 gather.say(
-                    "I wasn't able to resolve the issue with basic troubleshooting. "
-                    "I have two options for you. "
-                    "First, I can send you a link to upload a photo of your appliance "
-                    "for additional AI-powered diagnosis. "
-                    "Or second, I can help you schedule a technician visit. "
-                    "Would you like to upload a photo, or schedule a technician?"
+                    f"I understand{name_phrase}, sometimes these issues need a closer look. "
+                    "I have a couple of options that might help. "
+                    "I can send you a link to upload a photo of your appliance, "
+                    "and our AI will analyze it and give you more specific advice. "
+                    "Or, if you'd prefer, I can help you schedule a technician to come take a look in person. "
+                    "What would you prefer - upload a photo, or schedule a technician visit?"
                 )
                 response.redirect(VOICE_CONTINUE_URL)
     
     elif current_step == "offer_image_upload":
         text_lower = speech_result.lower()
+        customer_name = state.get("customer_name", "")
+        name_phrase = f", {customer_name}" if customer_name else ""
         
         if "photo" in text_lower or "picture" in text_lower or "image" in text_lower or "upload" in text_lower:
             # User wants Tier 3 image upload
@@ -532,8 +621,8 @@ async def voice_continue(request: Request):
             # Enhanced Gather for initial email collection
             gather = response.gather(
                 input="speech",
-                timeout=10,  # Longer timeout for spelling
-                speech_timeout="4",  # More pause tolerance between letters
+                timeout=15,
+                speech_timeout="5",
                 action=VOICE_CONTINUE_URL,
                 method="POST",
                 language="en-US",
@@ -542,9 +631,9 @@ async def voice_continue(request: Request):
                       "dot com, dot net, dot org, at the rate"
             )
             gather.say(
-                "Great! I'll send you an upload link by email. "
-                "Please spell your email slowly, letter by letter. "
-                "For example: k, a, s, i, dot, m, a, j, j, i, at, gmail, dot, com."
+                f"Perfect{name_phrase}! I'll send you a link to upload your photo. "
+                "What's your email address? You can spell it out letter by letter if that's easier. "
+                "For example: j, o, h, n, at, gmail, dot, com."
             )
             response.redirect(VOICE_CONTINUE_URL)
         
@@ -557,14 +646,14 @@ async def voice_continue(request: Request):
             
             gather = response.gather(
                 input="speech",
-                timeout=5,
-                speech_timeout="3",
+                timeout=10,
+                speech_timeout="5",
                 action=VOICE_CONTINUE_URL,
                 method="POST"
             )
             gather.say(
-                "Let me help you schedule a technician visit. "
-                "What is your ZIP code?"
+                f"Absolutely{name_phrase}! Let me help you schedule a technician visit. "
+                "To find available technicians in your area, could you please tell me your ZIP code?"
             )
             response.redirect(VOICE_CONTINUE_URL)
         
@@ -572,8 +661,8 @@ async def voice_continue(request: Request):
             # Unclear response, ask again
             gather = response.gather(
                 input="speech",
-                timeout=5,
-                speech_timeout="3",
+                timeout=10,
+                speech_timeout="5",
                 action=VOICE_CONTINUE_URL,
                 method="POST"
             )
