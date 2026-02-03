@@ -44,6 +44,97 @@ services:
       - voice-ai-network
     restart: unless-stopped
 
+  # Ngrok tunnel for public URL
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: shs-ngrok
+    env_file:
+      - app/.env
+    command: http voice-ai:8000 --log stdout
+    ports:
+      - "4040:4040"
+    networks:
+      - voice-ai-network
+    depends_on:
+      - voice-ai
+    restart: unless-stopped
+
+  # Auto-configure Twilio webhook with ngrok URL
+  twilio-config:
+    image: curlimages/curl:latest
+    container_name: shs-twilio-config
+    env_file:
+      - app/.env
+    depends_on:
+      - ngrok
+      - voice-ai
+    networks:
+      - voice-ai-network
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo ""
+        echo "============================================"
+        echo "🚀 Sears Voice Agent - Auto Configuration"
+        echo "============================================"
+        echo ""
+        echo "⏳ Waiting for ngrok to initialize..."
+        sleep 15
+        
+        echo "🔍 Fetching ngrok public URL..."
+        for i in 1 2 3 4 5; do
+          NGROK_URL=$$(curl -s http://ngrok:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"https://[^"]*' | head -1 | cut -d'"' -f4)
+          if [ -n "$$NGROK_URL" ]; then
+            break
+          fi
+          echo "   Retry $$i/5..."
+          sleep 5
+        done
+        
+        if [ -z "$$NGROK_URL" ]; then
+          echo "❌ ERROR: Failed to get ngrok URL after 5 attempts"
+          echo "   Check if NGROK_AUTHTOKEN is set correctly in .env"
+          exit 1
+        fi
+        
+        echo "✅ ngrok URL: $$NGROK_URL"
+        echo ""
+        echo "📞 Updating Twilio webhook configuration..."
+        
+        RESPONSE=$$(curl -s -w "\n%{http_code}" -X POST \
+          "https://api.twilio.com/2010-04-01/Accounts/$${TWILIO_ACCOUNT_SID}/IncomingPhoneNumbers/$${TWILIO_PHONE_NUMBER_SID}.json" \
+          -u "$${TWILIO_ACCOUNT_SID}:$${TWILIO_AUTH_TOKEN}" \
+          -d "VoiceUrl=$${NGROK_URL}/twilio/voice" \
+          -d "VoiceMethod=POST")
+        
+        HTTP_CODE=$$(echo "$$RESPONSE" | tail -1)
+        
+        if [ "$$HTTP_CODE" = "200" ]; then
+          echo "✅ Twilio webhook updated successfully!"
+          echo ""
+          echo "============================================"
+          echo "🎉 SYSTEM READY!"
+          echo "============================================"
+          echo ""
+          echo "📱 Voice Webhook: $${NGROK_URL}/twilio/voice"
+          echo "🖼️  Upload Page:   $${NGROK_URL}/upload/{token}"
+          echo "📊 ngrok Dashboard: http://localhost:4040"
+          echo "🏥 Health Check:   http://localhost:8000/health"
+          echo ""
+          echo "📞 Call your Twilio number to test!"
+          echo "============================================"
+        else
+          echo "❌ ERROR: Failed to update Twilio webhook (HTTP $$HTTP_CODE)"
+          echo "   Response: $$(echo "$$RESPONSE" | head -n -1)"
+          echo ""
+          echo "   Check your Twilio credentials in .env:"
+          echo "   - TWILIO_ACCOUNT_SID"
+          echo "   - TWILIO_AUTH_TOKEN"
+          echo "   - TWILIO_PHONE_NUMBER_SID"
+          exit 1
+        fi
+
 networks:
   voice-ai-network:
     driver: bridge
