@@ -1,5 +1,6 @@
 import os
 from dotenv import load_dotenv
+import logging
 
 load_dotenv()
 
@@ -10,8 +11,11 @@ APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8000").rstrip("/")
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
 GEMINI_MODEL = "gemini-2.5-flash"
 
+# Use basic logging here since logging_config may not be loaded yet
+_config_logger = logging.getLogger("voice_agent.config")
+
 if not GEMINI_API_KEY:
-    print("[WARNING] GOOGLE_API_KEY is not set. LLM features will fall back to keyword-based logic.")
+    _config_logger.warning("GOOGLE_API_KEY is not set. LLM features will fall back to keyword-based logic.")
 
 if APP_BASE_URL == "http://localhost:8000":
-    print("[WARNING] APP_BASE_URL is not set. Using default http://localhost:8000. Set APP_BASE_URL for production or ngrok.")
+    _config_logger.warning("APP_BASE_URL is not set. Using default http://localhost:8000. Set APP_BASE_URL for production or ngrok.")

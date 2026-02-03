@@ -11,6 +11,9 @@ from typing import Optional
 from .config import APP_BASE_URL
 from .db import SessionLocal
 from .models import ImageUploadToken
+from .logging_config import get_logger
+
+logger = get_logger("image_service")
 
 
 def generate_upload_token() -> str:
@@ -62,7 +65,7 @@ def create_image_upload_token(
         db.commit()
         db.refresh(upload_token)
         
-        print(f"[Tier 3] Created upload token for CallSid: {call_sid}, Email: {email}")
+        logger.info(f"Created upload token for CallSid: {call_sid}, Email: {email}")
         return upload_token
     finally:
         db.close()
@@ -209,13 +212,9 @@ Sears Home Services Team
 """
     
     if not sendgrid_key:
-        print("\n" + "=" * 60)
-        print("[DEV MODE] Email would be sent:")
-        print(f"To: {email}")
-        print(f"Subject: {subject}")
-        print("-" * 60)
-        print(body)
-        print("=" * 60 + "\n")
+        logger.info(f"[DEV MODE] Email would be sent to: {email}")
+        logger.debug(f"Subject: {subject}")
+        logger.debug(f"Body: {body[:200]}...")
         return True
     
     try:
@@ -232,11 +231,11 @@ Sears Home Services Team
         sg = SendGridAPIClient(sendgrid_key)
         response = sg.send(message)
         
-        print(f"[Tier 3] Email sent to {email}, status: {response.status_code}")
+        logger.info(f"Email sent to {email}, status: {response.status_code}")
         return response.status_code in [200, 201, 202]
         
     except Exception as e:
-        print(f"[Tier 3] Email error: {e}")
-        print(f"[Tier 3] Falling back to console output for: {email}")
-        print(f"[Tier 3] Upload URL: {upload_url}")
+        logger.error(f"Email error: {e}")
+        logger.warning(f"Falling back to console output for: {email}")
+        logger.info(f"Upload URL: {upload_url}")
         return True

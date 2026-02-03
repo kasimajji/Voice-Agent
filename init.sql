@@ -85,6 +85,16 @@ CREATE TABLE IF NOT EXISTS image_upload_tokens (
     INDEX idx_expires_at (expires_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Conversation states (shared across all workers)
+CREATE TABLE IF NOT EXISTS conversation_states (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    call_sid VARCHAR(100) UNIQUE NOT NULL,
+    state_data JSON NOT NULL,
+    updated_at DATETIME NOT NULL,
+    INDEX idx_call_sid (call_sid),
+    INDEX idx_updated_at (updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Grant privileges (for Docker MySQL user)
 GRANT ALL PRIVILEGES ON voice_ai.* TO 'voice_ai_user'@'%';
 FLUSH PRIVILEGES;

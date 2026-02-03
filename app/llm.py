@@ -2,6 +2,9 @@ import json
 import re
 import google.generativeai as genai
 from .config import GEMINI_API_KEY, GEMINI_MODEL
+from .logging_config import get_logger
+
+logger = get_logger("llm")
 
 model = None
 if GEMINI_API_KEY:
@@ -42,6 +45,62 @@ def _contains_appliance_hint(text: str) -> bool:
         if keyword in text_lower:
             return True
     return False
+
+
+def llm_extract_name(speech_text: str) -> str:
+    """
+    Extract customer name from speech using LLM.
+    
+    Handles various phrasings like:
+    - "My name is John"
+    - "I'm Sarah"
+    - "This is Mike calling"
+    - "John Smith"
+    - "It's Kasim"
+    
+    Returns:
+        First name only, title-cased. Returns "there" if no name found.
+    """
+    if not model or not speech_text.strip():
+        return "there"
+    
+    # Simple regex-based extraction as primary method (more reliable)
+    text = speech_text.strip()
+    
+    # Remove filler words
+    filler_pattern = r'^(uh,?\s*|um,?\s*|yeah,?\s*|yes,?\s*|so,?\s*|well,?\s*|okay,?\s*|ok,?\s*|hey,?\s*|hi,?\s*)+'
+    text = re.sub(filler_pattern, '', text, flags=re.IGNORECASE).strip()
+    
+    # Try to extract name after common prefixes
+    name_patterns = [
+        r"my name is\s+([A-Za-z]+)",
+        r"i'm\s+([A-Za-z]+)",
+        r"i am\s+([A-Za-z]+)",
+        r"this is\s+([A-Za-z]+)",
+        r"it's\s+([A-Za-z]+)",
+        r"call me\s+([A-Za-z]+)",
+    ]
+    
+    for pattern in name_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            name = match.group(1).title()
+            logger.debug(f"Name extracted via pattern: '{name}' from '{speech_text}'")
+            return name
+    
+    # If no pattern matched, take first capitalized word that looks like a name
+    words = text.split()
+    for word in words:
+        clean_word = word.strip(".,!?'\"")
+        # Skip common non-name words
+        skip_words = {"hey", "hi", "hello", "yes", "no", "yeah", "um", "uh", "well", "so", "okay", "ok", "good", "fine", "great", "thanks", "thank", "you", "the", "a", "an", "is", "am", "are", "my", "name", "i", "i'm", "it's", "this"}
+        if clean_word.lower() not in skip_words and len(clean_word) >= 2 and clean_word.isalpha():
+            name = clean_word.title()
+            logger.debug(f"Name extracted from first valid word: '{name}' from '{speech_text}'")
+            return name
+    
+    logger.debug(f"No valid name found in: '{speech_text}', using 'there'")
+    return "there"
 
 
 def llm_interpret_troubleshooting_response(speech_text: str, troubleshooting_step: str) -> dict:
@@ -147,15 +206,15 @@ Now analyze:"""
         
         # Ensure we have valid JSON
         if not raw_result or not raw_result.startswith('{'):
-            print(f"[LLM Troubleshoot] Invalid JSON format: '{raw_result}', using fallback")
+            logger.warning(f"Invalid JSON format: '{raw_result}', using fallback")
             raise ValueError("Invalid JSON format")
         
         parsed = json.loads(raw_result)
-        print(f"[LLM Troubleshoot] Interpreted '{speech_text}' as: {parsed}")
+        logger.debug(f"Interpreted '{speech_text}' as: {parsed}")
         return parsed
         
     except Exception as e:
-        print(f"[LLM Troubleshoot Error] {e}")
+        logger.error(f"Troubleshoot interpretation error: {e}")
         # Fallback to simple keyword matching
         text_lower = speech_text.lower()
         if any(word in text_lower for word in ["no", "still", "not working", "didn't help"]):
@@ -221,7 +280,7 @@ Name:"""
         try:
             raw_result = result.text.strip()
         except (ValueError, AttributeError) as e:
-            print(f"[LLM Name] Multi-part response: {e}")
+            logger.debug(f"Multi-part response: {e}")
             if hasattr(result, 'parts') and result.parts:
                 text_parts = []
                 for part in result.parts:
@@ -230,13 +289,13 @@ Name:"""
                 if text_parts:
                     raw_result = ''.join(text_parts).strip()
                 else:
-                    print(f"[LLM Name] No text in parts")
+                    logger.debug("No text in parts")
                     return None
             elif hasattr(result, 'candidates') and result.candidates and len(result.candidates) > 0:
                 try:
                     raw_result = result.candidates[0].content.parts[0].text.strip()
                 except (AttributeError, IndexError) as ex:
-                    print(f"[LLM Name] Cannot extract from candidates: {ex}, using fallback")
+                    logger.debug(f"Cannot extract from candidates: {ex}, using fallback")
                     # Use simple fallback extraction
                     text = speech_text.strip()
                     for prefix in ["my name is ", "i'm ", "this is ", "it's ", "i am ", "hey ", "hi "]:
@@ -248,11 +307,11 @@ Name:"""
                         name = name.strip('.,!?;:"\'')
                         if len(name) > 1 and name.isalpha():
                             name = name.capitalize()
-                            print(f"[LLM Name] Fallback extracted: '{name}'")
+                            logger.debug(f"Fallback extracted name: '{name}'")
                             return name
                     return None
             else:
-                print(f"[LLM Name] No candidates in response, using fallback")
+                logger.debug("No candidates in response, using fallback")
                 # Use simple fallback extraction
                 text = speech_text.strip()
                 for prefix in ["my name is ", "i'm ", "this is ", "it's ", "i am ", "hey ", "hi "]:
@@ -264,31 +323,31 @@ Name:"""
                     name = name.strip('.,!?;:"\'')
                     if len(name) > 1 and name.isalpha():
                         name = name.capitalize()
-                        print(f"[LLM Name] Fallback extracted: '{name}'")
+                        logger.debug(f"Fallback extracted name: '{name}'")
                         return name
                 return None
         
-        print(f"[LLM Name] Raw LLM output: '{raw_result}'")
+        logger.debug(f"Raw LLM output: '{raw_result}'")
         
         # Clean up result
         raw_result = raw_result.strip('"\' ').lower()
         
         # Check for explicit "none" response
         if raw_result in ('none', 'n/a', 'invalid', 'noise', 'no name'):
-            print(f"[LLM Name] LLM returned none for: '{speech_text}'")
+            logger.debug(f"LLM returned none for: '{speech_text}'")
             return None
         
         # Validate it looks like a name (alphabetic, reasonable length)
         if raw_result and raw_result.isalpha() and 2 <= len(raw_result) <= 20:
             name = raw_result.capitalize()
-            print(f"[LLM Name] Extracted: '{name}' from '{speech_text}'")
+            logger.debug(f"Extracted name: '{name}' from '{speech_text}'")
             return name
         
-        print(f"[LLM Name] Invalid name format: '{raw_result}' (isalpha={raw_result.isalpha() if raw_result else False}, len={len(raw_result) if raw_result else 0})")
+        logger.debug(f"Invalid name format: '{raw_result}' (isalpha={raw_result.isalpha() if raw_result else False}, len={len(raw_result) if raw_result else 0})")
         return None
         
     except Exception as e:
-        print(f"[LLM Name Error] Extraction failed: {e}")
+        logger.error(f"Name extraction failed: {e}")
         # Fallback to simple extraction
         text = speech_text.strip()
         for prefix in ["my name is ", "i'm ", "this is ", "it's ", "i am "]:
@@ -307,11 +366,11 @@ def llm_is_appliance_related(user_text: str) -> bool:
     """
     # First check for brand names or appliance keywords (fast, handles STT errors)
     if _contains_appliance_hint(user_text):
-        print(f"[Validation] Brand/keyword detected in: '{user_text}' -> True")
+        logger.debug(f"Brand/keyword detected in: '{user_text}' -> True")
         return True
     
     if not model:
-        print("[LLM] No Gemini model available, assuming appliance-related")
+        logger.debug("No Gemini model available, assuming appliance-related")
         return True
     
     try:
@@ -332,11 +391,11 @@ User message:
         answer = result.text.strip().lower()
         
         is_related = answer == "yes" or answer.startswith("yes")
-        print(f"[LLM] Appliance relevance check: '{user_text}' -> {is_related}")
+        logger.debug(f"Appliance relevance check: '{user_text}' -> {is_related}")
         return is_related
         
     except Exception as e:
-        print(f"[LLM Error] Appliance relevance check failed: {e}")
+        logger.error(f"Appliance relevance check failed: {e}")
         return True  # Default to True on error to avoid blocking flow
 
 
@@ -346,7 +405,7 @@ def llm_classify_appliance(user_text: str) -> str | None:
     Returns one of: washer, dryer, refrigerator, dishwasher, oven, hvac, or None.
     """
     if not model:
-        print("[LLM] No Gemini model available, skipping LLM classification")
+        logger.debug("No Gemini model available, skipping LLM classification")
         return None
     
     try:
@@ -363,14 +422,14 @@ User text:
         )
         appliance = result.text.strip().lower()
         
-        print(f"[LLM] Appliance classification result: {appliance}")
+        logger.debug(f"Appliance classification result: {appliance}")
         
         if appliance in VALID_APPLIANCES:
             return appliance if appliance != "other" else None
         return None
         
     except Exception as e:
-        print(f"[LLM Error] Appliance classification failed: {e}")
+        logger.error(f"Appliance classification failed: {e}")
         return None
 
 
@@ -525,12 +584,12 @@ def llm_extract_email(speech_text: str) -> str | None:
         Extracted email string if found, None otherwise.
     """
     if not speech_text or not speech_text.strip():
-        print("[Email Extract] Empty input")
+        logger.debug("Email extract: Empty input")
         return None
     
     # Step 1: Deterministic pre-processing (handles all STT artifacts)
     normalized = _normalize_speech_for_email(speech_text)
-    print(f"[Email Extract] Normalized: '{normalized}' from '{speech_text}'")
+    logger.debug(f"Email normalized: '{normalized}' from '{speech_text}'")
     
     # Step 2: Build email from normalized text
     # The normalized text should look like: "shinyangelinajalli @ gmail.com"
@@ -542,7 +601,7 @@ def llm_extract_email(speech_text: str) -> str | None:
     # Remove any trailing punctuation
     email_candidate = email_candidate.rstrip('.,;:!?')
     
-    print(f"[Email Extract] Candidate after cleanup: '{email_candidate}'")
+    logger.debug(f"Email candidate after cleanup: '{email_candidate}'")
     
     # Step 3: Extract email using regex
     match = _EMAIL_REGEX.search(email_candidate)
@@ -552,10 +611,10 @@ def llm_extract_email(speech_text: str) -> str | None:
         email_no_spaces = email_candidate.replace(' ', '')
         match = _EMAIL_REGEX.search(email_no_spaces)
         if match:
-            print(f"[Email Extract] Found after removing spaces: '{email_no_spaces}'")
+            logger.debug(f"Email found after removing spaces: '{email_no_spaces}'")
     
     if not match:
-        print(f"[Email Extract] No valid email pattern found in: '{email_candidate}'")
+        logger.debug(f"No valid email pattern found in: '{email_candidate}'")
         return None
     
     email = match.group(0).lower()
@@ -563,10 +622,10 @@ def llm_extract_email(speech_text: str) -> str | None:
     # Step 4: Validate TLD
     has_valid_tld = any(email.endswith(tld) for tld in _VALID_TLDS)
     if not has_valid_tld:
-        print(f"[Email Extract] Rejected - invalid TLD: '{email}'")
+        logger.debug(f"Email rejected - invalid TLD: '{email}'")
         return None
     
-    print(f"[Email Extract] SUCCESS: '{email}'")
+    logger.info(f"Email extracted: '{email}'")
     return email
 
 
@@ -582,7 +641,7 @@ def llm_extract_symptoms(user_text: str) -> dict:
     }
     
     if not model:
-        print("[LLM] No Gemini model available, using fallback for symptoms")
+        logger.debug("No Gemini model available, using fallback for symptoms")
         return fallback
     
     try:
@@ -606,7 +665,7 @@ Caller description:
         )
         raw = result.text.strip()
         
-        print(f"[LLM] Symptom extraction raw result: {raw}")
+        logger.debug(f"Symptom extraction raw result: {raw}")
         
         if raw.startswith("```"):
             lines = raw.split("\n")
@@ -631,9 +690,9 @@ Caller description:
             "is_urgent": bool(data.get("is_urgent"))
         }
         
-        print(f"[LLM] Symptom extraction parsed: {extracted}")
+        logger.debug(f"Symptom extraction parsed: {extracted}")
         return extracted
         
     except Exception as e:
-        print(f"[LLM Error] Symptom extraction failed: {e}")
+        logger.error(f"Symptom extraction failed: {e}")
         return fallback

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, JSON
 from sqlalchemy.orm import relationship
 from .db import Base
 
@@ -76,3 +76,13 @@ class ImageUploadToken(Base):
     analysis_summary = Column(Text, nullable=True)
     troubleshooting_tips = Column(Text, nullable=True)
     is_appliance_image = Column(Boolean, nullable=True, default=None)
+
+
+class ConversationState(Base):
+    """Stores conversation state for each call - shared across all workers."""
+    __tablename__ = "conversation_states"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    call_sid = Column(String(100), unique=True, index=True, nullable=False)
+    state_data = Column(JSON, nullable=False)  # Stores the full state dict as JSON
+    updated_at = Column(DateTime, nullable=False)

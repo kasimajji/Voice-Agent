@@ -4,12 +4,18 @@ Analyze appliance images using Gemini multimodal model.
 
 ISSUE 2: Enhanced to detect if image actually shows an appliance.
 """
-import json
+import os
 import base64
+import json
 from typing import Optional, Dict, Any
 from pathlib import Path
 
+import google.generativeai as genai
+
 from .config import GEMINI_API_KEY, GEMINI_MODEL
+from .logging_config import get_logger
+
+logger = get_logger("vision")
 
 
 def analyze_image_with_gemini(
@@ -33,7 +39,7 @@ def analyze_image_with_gemini(
         }
     """
     if not GEMINI_API_KEY:
-        print("[Vision] No GEMINI_API_KEY set, using fallback response")
+        logger.warning("No GEMINI_API_KEY set, using fallback response")
         return fallback_analysis(appliance_type, symptom_summary)
     
     try:
@@ -43,7 +49,7 @@ def analyze_image_with_gemini(
         
         image_data = load_image_as_base64(image_path)
         if not image_data:
-            print(f"[Vision] Failed to load image: {image_path}")
+            logger.error(f"Failed to load image: {image_path}")
             return fallback_analysis(appliance_type, symptom_summary)
         
         mime_type = get_mime_type(image_path)
@@ -99,12 +105,12 @@ Be strict about is_appliance_image - only set to true if you can clearly see a h
         ])
         
         result_text = response.text.strip()
-        print(f"[Vision] Raw response: {result_text[:200]}...")
+        logger.debug(f"Raw response: {result_text[:200]}...")
         
         return parse_vision_response(result_text, appliance_type, symptom_summary)
         
     except Exception as e:
-        print(f"[Vision] Error during analysis: {e}")
+        logger.error(f"Error during analysis: {e}")
         return fallback_analysis(appliance_type, symptom_summary)
 
 
@@ -118,7 +124,7 @@ def load_image_as_base64(image_path: str) -> Optional[str]:
         with open(path, "rb") as f:
             return base64.standard_b64encode(f.read()).decode("utf-8")
     except Exception as e:
-        print(f"[Vision] Error loading image: {e}")
+        logger.error(f"Error loading image: {e}")
         return None
 
 
@@ -167,7 +173,7 @@ def parse_vision_response(
             "is_appliance_image": bool(is_appliance)
         }
     except json.JSONDecodeError:
-        print("[Vision] Failed to parse JSON, using raw text")
+        logger.warning("Failed to parse JSON, using raw text")
         
         lines = response_text.split("\n")
         summary_lines = []

@@ -16,6 +16,9 @@ from .image_service import (
     update_token_analysis
 )
 from .vision import analyze_image_with_gemini
+from .logging_config import get_logger
+
+logger = get_logger("upload")
 
 router = APIRouter()
 
@@ -255,7 +258,7 @@ async def upload_image(token: str, image: UploadFile = File(...)):
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(image.file, buffer)
         
-        print(f"[Tier 3] Image saved: {file_path}")
+        logger.info(f"Image saved: {file_path}")
         
         mark_token_used(token, str(file_path))
         
@@ -289,7 +292,7 @@ async def upload_image(token: str, image: UploadFile = File(...)):
         ))
         
     except Exception as e:
-        print(f"[Tier 3] Upload error: {e}")
+        logger.error(f"Upload error: {e}")
         return HTMLResponse(content=error_page("Upload Failed",
             "There was an error processing your image. Please try again."), status_code=500)
 

@@ -1,6 +1,9 @@
 from datetime import datetime, timedelta
+import logging
 from .db import SessionLocal
 from .models import Technician, TechnicianServiceArea, TechnicianSpecialty, AvailabilitySlot
+
+logger = logging.getLogger("voice_agent.seed")
 
 
 # Technician data: name, phone, email, zip_codes, specialties
@@ -68,7 +71,7 @@ def seed_data():
     db = SessionLocal()
     try:
         if db.query(Technician).first():
-            print("[Seed] Data already exists, skipping seed.")
+            logger.info("Data already exists, skipping seed.")
             return
 
         technicians = []
@@ -123,11 +126,11 @@ def seed_data():
         db.add_all(slots)
         db.commit()
         
-        print(f"[Seed] Database seeded: {len(technicians)} technicians, "
+        logger.info(f"Database seeded: {len(technicians)} technicians, "
               f"{len(service_areas)} service areas, {len(specialties)} specialties, "
               f"{len(slots)} availability slots.")
     except Exception as e:
-        print(f"[Seed Error] Failed to seed database: {e}")
+        logger.error(f"Failed to seed database: {e}")
         db.rollback()
     finally:
         db.close()
