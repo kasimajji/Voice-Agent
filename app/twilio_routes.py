@@ -1089,6 +1089,14 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
         # Fetch analysis from DB
         upload_status = get_upload_status_by_call_sid(call_sid)
         
+        # Check if we already spoke the analysis (to avoid re-speaking on no-input)
+        if state.get("analysis_spoken"):
+            # Already spoke, user responded - handle their response
+            state["step"] = "after_analysis"
+            update_state(call_sid, state)
+            response.redirect(VOICE_CONTINUE_URL)
+            return Response(content=str(response), media_type="application/xml")
+        
         if not upload_status or not upload_status.get("analysis_ready"):
             # No analysis available - shouldn't happen but handle gracefully
             state["step"] = "collect_zip"
@@ -1136,18 +1144,18 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             response.redirect(VOICE_CONTINUE_URL)
         
         else:
-            # Valid appliance image with analysis
+            # Valid appliance image with analysis - SPEAK IMMEDIATELY without waiting for input
             summary = upload_status.get("analysis_summary", "")
             tips = upload_status.get("troubleshooting_tips", "")
             
-            state["image_analysis_spoken"] = True
+            state["analysis_spoken"] = True
             state["step"] = "after_analysis"
             update_state(call_sid, state)
             
             logger.info("Speaking analysis results to user", extra={"call_sid": call_sid, "step": "speak_analysis"})
             
             # Build response with analysis
-            analysis_speech = "Thanks, I've reviewed your image. "
+            analysis_speech = "Great news! I've analyzed your image. "
             
             if summary:
                 # Truncate if too long for speech
@@ -1155,24 +1163,25 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                     summary = summary[:297] + "..."
                 analysis_speech += summary + " "
             
-            gather = response.gather(
-                input="speech",
-                timeout=5,
-                speech_timeout="3",
-                action=VOICE_CONTINUE_URL,
-                method="POST",
-            bargeIn=False
-            )
-            
             if tips:
                 # Truncate tips for speech
                 if len(tips) > 200:
                     tips = tips[:197] + "..."
                 analysis_speech += f"Here's what you can try: {tips} "
-                analysis_speech += "Would you like to try this now and let me know if it helps? Or would you prefer to schedule a technician?"
+                analysis_speech += "Let me know if that helps, or say 'schedule' to book a technician."
             else:
                 analysis_speech += "Based on what I see, I recommend scheduling a technician for a proper diagnosis. Would you like to schedule an appointment?"
             
+            # Speak analysis and gather response
+            gather = response.gather(
+                input="speech",
+                timeout=10,
+                speech_timeout="3",
+                action=VOICE_CONTINUE_URL,
+                method="POST",
+                bargeIn=False
+            )
+            log_conversation(call_sid, "AGENT", analysis_speech, "speak_analysis")
             gather.append(create_ssml_say(analysis_speech, voice="professional", rate="slow"))
             response.redirect(VOICE_CONTINUE_URL)
     

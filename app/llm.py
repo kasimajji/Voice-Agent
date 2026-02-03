@@ -129,7 +129,7 @@ Just the name:"""
                 name = raw_result.strip('"\'.,!?').title()
                 
                 # Validate result
-                invalid_responses = {"there", "unknown", "none", "n/a", "na", "", "friend", "hey", "hi", "hello"}
+                invalid_responses = {"there", "unknown", "none", "n/a", "na", "", "friend", "hey", "hi", "hello", "say", "yes", "no", "yeah", "okay", "ok"}
                 if name and name.lower() not in invalid_responses and len(name) < 20 and ' ' not in name:
                     logger.debug(f"Name decoded by LLM: '{name}' from '{speech_text}'")
                     return name

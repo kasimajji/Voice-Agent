@@ -49,17 +49,24 @@ def find_available_slots(zip_code: str, appliance_type: str, time_preference: st
                 func.extract('hour', AvailabilitySlot.start_time) >= 12
             )
         
-        query = query.order_by(AvailabilitySlot.start_time).limit(limit)
+        query = query.order_by(AvailabilitySlot.start_time)
         
         results = []
+        seen_times = set()  # Track unique time slots to avoid duplicates
         for slot in query.all():
-            results.append({
-                "slot_id": slot.id,
-                "technician_name": slot.technician.name,
-                "technician_id": slot.technician.id,
-                "start_time": slot.start_time,
-                "end_time": slot.end_time
-            })
+            # Create a unique key based on start_time to avoid showing same time multiple times
+            time_key = slot.start_time.strftime("%Y-%m-%d %H:%M")
+            if time_key not in seen_times:
+                seen_times.add(time_key)
+                results.append({
+                    "slot_id": slot.id,
+                    "technician_name": slot.technician.name,
+                    "technician_id": slot.technician.id,
+                    "start_time": slot.start_time,
+                    "end_time": slot.end_time
+                })
+                if len(results) >= limit:
+                    break
         return results
     finally:
         db.close()
