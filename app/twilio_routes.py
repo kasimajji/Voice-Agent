@@ -238,10 +238,94 @@ async def voice_continue(request: Request):
 async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict, response: VoiceResponse):
     """Inner handler for voice_continue - separated for cleaner error handling."""
     
+    current_step = state.get("step", "greet_ask_name")
+    
     if not speech_result.strip():
         state["no_input_attempts"] = state.get("no_input_attempts", 0) + 1
         update_state(call_sid, state)
         
+        # Special handling for waiting_for_upload - check if image was uploaded automatically
+        if current_step == "waiting_for_upload":
+            upload_status = get_upload_status_by_call_sid(call_sid)
+            
+            if upload_status and upload_status.get("analysis_ready"):
+                # Image uploaded and analyzed - auto-detect without customer confirmation!
+                state["step"] = "speak_analysis"
+                state["no_input_attempts"] = 0
+                update_state(call_sid, state)
+                logger.info("Auto-detected image upload, speaking results", extra={"call_sid": call_sid, "step": "waiting_for_upload"})
+                response.redirect(VOICE_CONTINUE_URL)
+                return Response(content=str(response), media_type="application/xml")
+            
+            elif upload_status and upload_status.get("image_uploaded"):
+                # Image uploaded but analysis not ready - wait a bit more
+                state["no_input_attempts"] = 0
+                update_state(call_sid, state)
+                gather = response.gather(
+                    input="speech",
+                    timeout=10,
+                    speech_timeout="3",
+                    action=VOICE_CONTINUE_URL,
+                    method="POST",
+                    bargeIn=False
+                )
+                agent_text = "I see your image was received. Just a moment while I analyze it."
+                log_conversation(call_sid, "AGENT", agent_text, "waiting_for_upload")
+                gather.append(create_ssml_say(agent_text, voice="default", rate="normal"))
+                response.pause(length=3)
+                response.redirect(VOICE_CONTINUE_URL)
+                return Response(content=str(response), media_type="application/xml")
+            
+            else:
+                # Still waiting for upload - ask if they need more time
+                upload_wait_attempts = state.get("upload_wait_attempts", 0) + 1
+                state["upload_wait_attempts"] = upload_wait_attempts
+                update_state(call_sid, state)
+                
+                if upload_wait_attempts <= 2:
+                    gather = response.gather(
+                        input="speech",
+                        timeout=20,
+                        speech_timeout="3",
+                        action=VOICE_CONTINUE_URL,
+                        method="POST",
+                        bargeIn=False
+                    )
+                    agent_text = (
+                        "I'm still here waiting for your upload. "
+                        "Do you need more time? Just say 'yes' if you need more time, "
+                        "or 'skip' if you'd like to schedule a technician instead."
+                    )
+                    log_conversation(call_sid, "AGENT", agent_text, "waiting_for_upload")
+                    gather.append(create_ssml_say(agent_text, voice="default", rate="normal"))
+                    response.redirect(VOICE_CONTINUE_URL)
+                else:
+                    # After 2 retries, redirect to schedule technician
+                    state["step"] = "collect_zip"
+                    state["upload_wait_attempts"] = 0
+                    state["no_input_attempts"] = 0
+                    update_state(call_sid, state)
+                    
+                    gather = response.gather(
+                        input="speech",
+                        timeout=8,
+                        speech_timeout="3",
+                        action=VOICE_CONTINUE_URL,
+                        method="POST",
+                        bargeIn=False
+                    )
+                    agent_text = (
+                        "No worries, let's schedule a technician to help you in person. "
+                        "You can still upload the photo later using the link in your email. "
+                        "What is your ZIP code?"
+                    )
+                    log_conversation(call_sid, "AGENT", agent_text, "collect_zip")
+                    gather.append(create_ssml_say(agent_text, voice="default", rate="normal"))
+                    response.redirect(VOICE_CONTINUE_URL)
+                
+                return Response(content=str(response), media_type="application/xml")
+        
+        # Normal no-input handling for other steps
         if state["no_input_attempts"] <= 2:
             no_input_text = (
                 "I'm sorry, I didn't hear anything. "
@@ -261,13 +345,26 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             gather.append(say_obj)
             response.redirect(VOICE_CONTINUE_URL)
         else:
-            response.append(create_ssml_say(
-                "I'm still not hearing anything clearly, "
-                "so I'll end the call here. "
-                "You can call us back any time. Goodbye.",
-                voice="empathetic", rate="slow"
-            ))
-            response.hangup()
+            # After 3 no-input attempts, redirect to scheduling instead of hanging up
+            state["step"] = "collect_zip"
+            state["no_input_attempts"] = 0
+            update_state(call_sid, state)
+            
+            gather = response.gather(
+                input="speech",
+                timeout=8,
+                speech_timeout="3",
+                action=VOICE_CONTINUE_URL,
+                method="POST",
+                bargeIn=False
+            )
+            agent_text = (
+                "I'm having trouble hearing you. Let me help you schedule a technician. "
+                "What is your ZIP code?"
+            )
+            log_conversation(call_sid, "AGENT", agent_text, "collect_zip")
+            gather.append(create_ssml_say(agent_text, voice="empathetic", rate="slow"))
+            response.redirect(VOICE_CONTINUE_URL)
         
         return Response(content=str(response), media_type="application/xml")
     
@@ -801,6 +898,37 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
     
     elif current_step == "waiting_for_upload":
         text_lower = speech_result.lower()
+        
+        # First, always check if image was uploaded automatically
+        upload_status = get_upload_status_by_call_sid(call_sid)
+        if upload_status and upload_status.get("analysis_ready"):
+            # Auto-detect: Image uploaded and analyzed!
+            state["step"] = "speak_analysis"
+            state["upload_wait_attempts"] = 0
+            update_state(call_sid, state)
+            logger.info("Auto-detected image upload during speech, speaking results", extra={"call_sid": call_sid, "step": "waiting_for_upload"})
+            response.redirect(VOICE_CONTINUE_URL)
+            return Response(content=str(response), media_type="application/xml")
+        
+        # Check if user says they need more time
+        if "yes" in text_lower or "more time" in text_lower or "wait" in text_lower or "minute" in text_lower:
+            # User needs more time - reset wait counter and give them time
+            state["upload_wait_attempts"] = 0
+            update_state(call_sid, state)
+            
+            gather = response.gather(
+                input="speech",
+                timeout=30,  # Give them more time
+                speech_timeout="3",
+                action=VOICE_CONTINUE_URL,
+                method="POST",
+                bargeIn=False
+            )
+            agent_text = "No problem, take your time. Just let me know when you've uploaded the image, or say 'skip' to schedule a technician."
+            log_conversation(call_sid, "AGENT", agent_text, "waiting_for_upload")
+            gather.append(create_ssml_say(agent_text, voice="default", rate="normal"))
+            response.redirect(VOICE_CONTINUE_URL)
+            return Response(content=str(response), media_type="application/xml")
         
         # Check if user says they're done or wants to skip
         if "done" in text_lower or "uploaded" in text_lower or "finished" in text_lower:
