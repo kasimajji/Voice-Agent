@@ -1,385 +1,235 @@
-# 🏠 Voice AI Home Appliance Support Assistant
+# Home Services - Voice AI Agent
 
-An end-to-end voice agent that handles inbound calls, diagnoses appliance issues via conversation, and schedules technicians. Built for the **Sears Home Services AI Engineer** take-home assessment.
+An intelligent voice-based customer support agent for home appliance troubleshooting, built with FastAPI, Twilio, and Google Gemini AI.
 
----
+## 🎯 Features
 
-## 📞 Live Demo
+- **Voice Interaction**: Natural phone-based conversations via Twilio
+- **AI-Powered Troubleshooting**: 3-tier support system using Gemini 2.5 Flash
+- **Image Analysis**: Upload appliance photos for visual diagnosis
+- **Smart Scheduling**: Automated technician appointment booking
+- **Email Notifications**: SendGrid integration for upload links
 
-| | |
-|---|---|
-| **Phone Number** | +1-XXX-XXX-XXXX |
-| **Tech Stack** | FastAPI · Twilio · Gemini (text + vision) · MySQL · SendGrid · Docker |
+## 🏗️ Architecture
 
-> Call the number above to experience the full voice agent flow!
+![High Level Architecture](High_level_arch.png)
 
----
-
-## ✨ Features
-
-### Tier 1 – Core Voice Agent
-- **Inbound call handling** – Twilio webhook integration for real-time voice interactions
-- **Appliance identification** – LLM-powered classification of appliance types from natural speech
-- **Multi-turn symptom collection** – Contextual follow-up questions to gather issue details
-- **Troubleshooting flows with conversation memory** – State machine maintains context across turns
-
-### Tier 2 – Technician Scheduling
-- **Technician database** – 20 technicians across 5 metro areas with real availability slots
-- **ZIP + appliance matching** – Finds technicians by location and specialty
-- **Appointment slot offering and booking** – Voice-guided slot selection with confirmation
-
-### Tier 3 – Visual Diagnosis
-- **Email capture and secure upload link** – Robust speech-to-text email extraction with confirmation loop
-- **Image ingestion endpoint** – Secure token-based upload page
-- **Gemini Vision-based analysis** – AI analyzes appliance photos and provides specific troubleshooting advice
-
----
-
-## 🏗️ Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              HIGH-LEVEL COMPONENTS                          │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│   📞 Twilio          ──►   🚀 FastAPI Webhooks                              │
-│   (Inbound Calls)          (Voice Handler)                                  │
-│                                   │                                         │
-│                                   ▼                                         │
-│                         🤖 LLM Orchestrator (Gemini)                        │
-│                         - Name extraction                                   │
-│                         - Appliance classification                          │
-│                         - Symptom analysis                                  │
-│                         - Vision analysis                                   │
-│                                   │                                         │
-│                                   ▼                                         │
-│                      💬 Conversation State Manager                          │
-│                      (In-memory state machine)                              │
-│                                   │                                         │
-│                    ┌──────────────┼──────────────┐                          │
-│                    ▼              ▼              ▼                          │
-│              🗄️ MySQL DB    📧 SendGrid    🖼️ Image Upload                  │
-│              (Scheduling)   (Email Links)  (Vision Analysis)                │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 🚀 Getting Started
+## 🚀 Quick Start
 
 ### Prerequisites
 
-| Requirement | Description |
-|-------------|-------------|
-| **Python 3.11+** | Runtime environment |
-| **Docker & docker-compose** | Container orchestration |
-| **Twilio Account** | Phone number + API credentials |
-| **Google AI API Key** | Gemini 2.5 Flash for LLM + Vision |
-| **SendGrid API Key** | (Optional) For email delivery |
-| **ngrok Account** | (Free) For local tunnel |
+- Docker & Docker Compose
+- Twilio Account (with phone number)
+- Google AI API Key (Gemini)
+- ngrok (for local development)
 
-### One-Command Setup
+### 1. Clone & Configure
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/kasimajji/Voice-Agent.git
-cd Voice-Agent
+git clone https://github.com/yourusername/shs-voice-ai-agent.git
+cd shs-voice-ai-agent
 
-# 2. Create environment file
+# Create environment file
 cp app/.env.example app/.env
-
-# 3. Edit app/.env with your credentials (see below)
-
-# 4. Launch everything with ONE command
-docker-compose up --build
+# Edit app/.env with your API keys
 ```
 
-**That's it!** The system will automatically:
-- ✅ Start MySQL 8.0 database
-- ✅ Initialize schema and seed technician data
-- ✅ Start the FastAPI voice agent
-- ✅ Create ngrok tunnel for public URL
-- ✅ Update Twilio webhook automatically
+### 2. Environment Variables
 
----
-
-## 🔐 Environment Configuration
-
-Create `app/.env` with the following variables:
+Create `app/.env`:
 
 ```env
-# ============================================================================
-# REQUIRED CREDENTIALS
-# ============================================================================
-
-# ngrok Authentication (get free token at https://ngrok.com)
-NGROK_AUTHTOKEN=your_ngrok_auth_token
-
-# Twilio Credentials (from Twilio Console)
-TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-TWILIO_AUTH_TOKEN=your_twilio_auth_token
-TWILIO_PHONE_NUMBER_SID=PNxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-
-# Google Gemini API Key (from Google AI Studio)
 GOOGLE_API_KEY=your_gemini_api_key
+APP_BASE_URL=https://your-domain.ngrok-free.app
+SENDGRID_API_KEY=your_sendgrid_key  # Optional
+SENDGRID_FROM_EMAIL=noreply@yourdomain.com  # Optional
 
-# ============================================================================
-# OPTIONAL CREDENTIALS
-# ============================================================================
-
-# SendGrid for email delivery (optional - falls back to console logging)
-SENDGRID_API_KEY=SG.your_sendgrid_api_key
-SENDGRID_FROM_EMAIL=noreply@yourdomain.com
-
-# App Base URL (auto-configured by ngrok, but can override)
-APP_BASE_URL=http://localhost:8000
-
-# ============================================================================
-# DATABASE (Auto-configured for Docker - no changes needed)
-# ============================================================================
+# MySQL credentials (for local development)
+# Docker will override DB_HOST automatically
 DB_HOST=localhost
 DB_PORT=3306
 DB_USER=voice_ai_user
 DB_PASSWORD=voiceaipassword
 DB_NAME=voice_ai
-DB_ROOT_PASSWORD=rootpassword
 ```
 
-### Where to Get Credentials
+### 3. Launch with Docker (One Command!)
 
-| Credential | Where to Find |
-|------------|---------------|
-| `NGROK_AUTHTOKEN` | [ngrok Dashboard](https://dashboard.ngrok.com/get-started/your-authtoken) → Your Authtoken |
-| `TWILIO_ACCOUNT_SID` | [Twilio Console](https://console.twilio.com/) → Account Info |
-| `TWILIO_AUTH_TOKEN` | [Twilio Console](https://console.twilio.com/) → Account Info |
-| `TWILIO_PHONE_NUMBER_SID` | [Twilio Console](https://console.twilio.com/us1/develop/phone-numbers/manage/incoming) → Click number → Phone Number SID |
-| `GOOGLE_API_KEY` | [Google AI Studio](https://aistudio.google.com/app/apikey) → Create API Key |
-| `SENDGRID_API_KEY` | [SendGrid](https://app.sendgrid.com/settings/api_keys) → Create API Key |
+```bash
+# Build and start both MySQL and the app
+docker-compose up --build
 
----
+# Or run in background
+docker-compose up -d --build
+
+# The setup will:
+# ✅ Start MySQL 8.0 container
+# ✅ Initialize database schema automatically
+# ✅ Seed 20 technicians with availability
+# ✅ Start the FastAPI app
+# ✅ Handle 4+ simultaneous voice calls
+```
+
+**That's it!** The database is fully configured and ready for voice interactions.
+
+### 4. Expose with ngrok (Development)
+
+```bash
+ngrok http 8000
+# Copy the HTTPS URL to APP_BASE_URL in .env
+```
+
+### 5. Configure Twilio
+
+1. Go to Twilio Console → Phone Numbers
+2. Select your number → Voice Configuration
+3. Set webhook URL: `https://your-domain.ngrok-free.app/twilio/voice`
+4. Method: POST
+
+### 6. Test
+
+Call your Twilio phone number and describe an appliance issue!
 
 ## 📁 Project Structure
 
 ```
-Voice-Agent/
+shs-voice-ai-agent/
 ├── app/
-│   ├── main.py              # FastAPI application entry point
-│   ├── config.py            # Environment configuration
-│   ├── db.py                # SQLAlchemy database setup
-│   ├── models.py            # Database models (Technician, Appointment, etc.)
-│   ├── llm.py               # Gemini LLM integration (text + vision)
-│   ├── conversation.py      # Conversation state machine
-│   ├── twilio_routes.py     # Voice webhook handlers (main call flow)
-│   ├── upload_routes.py     # Image upload endpoints
-│   ├── image_service.py     # Image analysis & email service
-│   ├── scheduling.py        # Technician availability & booking
-│   ├── logging_config.py    # Structured logging
-│   ├── seed.py              # Database seeding (20 technicians)
-│   └── .env.example         # Environment template
-├── templates/
-│   └── upload.html          # Image upload page
-├── uploads/                 # Uploaded images directory
-├── docker-compose.yml       # Multi-container orchestration
-├── Dockerfile               # Application container
-├── init.sql                 # Database schema
-├── requirements.txt         # Python dependencies
-└── README.md                # This file
+│   ├── main.py           # FastAPI application entry
+│   ├── config.py         # Environment configuration
+│   ├── db.py             # Database setup (SQLAlchemy)
+│   ├── models.py         # Data models
+│   ├── llm.py            # Gemini AI integration
+│   ├── conversation.py   # Conversation state management
+│   ├── twilio_routes.py  # Voice webhook handlers
+│   ├── upload_routes.py  # Image upload endpoints
+│   ├── image_service.py  # Image analysis service
+│   └── seed.py           # Database seeding
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+└── README.md
 ```
 
----
+## 🎭 Support Tiers (Maps to Assignment Tiers 1-3)
 
-## 🎭 Support Tiers
+### Tier 1: Conversational Troubleshooting (Assignment Tier 1)
 
-### Tier 1: Conversational Troubleshooting
+- Appliance classification via Gemini LLM
+- Common fixes (power cycle, check connections)
+- No personal info required
+- ~30 seconds resolution for simple issues
 
-| Feature | Description |
-|---------|-------------|
-| **Natural Greeting** | Personalized welcome with name capture |
-| **Appliance Classification** | LLM identifies washer, dryer, fridge, dishwasher, oven, HVAC |
-| **Symptom Extraction** | Structured analysis of error codes, noises, behaviors |
-| **Guided Troubleshooting** | Step-by-step fixes with yes/no confirmation |
+### Tier 2: Structured Diagnosis (Assignment Tier 2)
 
-**Example Flow:**
-```
-Agent: "Hi! Thanks for calling Sears Home Services. May I have your name?"
-User:  "Hi, my name is John"
-Agent: "Nice to meet you, John! How are you doing today?"
-User:  "Good, my refrigerator is making a loud noise"
-Agent: "Got it, John! So you're having trouble with your refrigerator..."
-```
+- Detailed symptom extraction
+- Brand and model detection
+- Model-specific troubleshooting steps
+- Escalates to Tier 3 if unresolved
 
-### Tier 2: Technician Scheduling
+### Tier 3: Image-Based Analysis (Assignment Tier 3)
 
-| Feature | Description |
-|---------|-------------|
-| **ZIP Code Collection** | Voice-based location capture |
-| **Availability Lookup** | Real-time slot search by ZIP + appliance |
-| **Slot Selection** | "Option 1, 2, or 3" voice selection |
-| **Booking Confirmation** | Appointment details read back |
+- Email collection with robust STT handling
+- Photo upload via secure token link
+- Gemini Vision analyzes appliance images
+- Specific repair recommendations based on visual inspection
 
-**Coverage Areas:**
+### Tier 4: Technician Scheduling (Bonus)
 
-| Metro Area | ZIP Codes |
-|------------|-----------|
-| Chicago | 60115, 60601, 60602, 60611 |
-| New York | 10001, 10002, 11201 |
-| San Francisco | 94105 |
-| Dallas | 75201 |
-| Atlanta | 30301 |
+- ZIP code-based availability lookup
+- Real-time slot booking with confirmation
+- Fallback when AI troubleshooting insufficient
 
-### Tier 3: Visual Diagnosis
+## � Service Coverage
 
-| Feature | Description |
-|---------|-------------|
-| **Email Capture** | Robust STT with spelling confirmation |
-| **Secure Upload Link** | Token-based URL sent via email |
-| **Image Validation** | Checks if image shows an appliance |
-| **Vision Analysis** | Gemini analyzes photo for issues |
-| **Specific Recommendations** | Tailored troubleshooting based on visual inspection |
+**20 technicians** across **5 metro areas** covering **10 ZIP codes**:
 
-**Example Flow:**
-```
-Agent: "I can send you a link to upload a photo. What's your email?"
-User:  "j o h n at gmail dot com"
-Agent: "I heard J-O-H-N at G-M-A-I-L dot C-O-M. Is that correct?"
-User:  "Yes"
-Agent: "I've sent an upload link to your email..."
-[User uploads photo]
-Agent: "I've analyzed your image. I can see frost buildup on the evaporator coils..."
-```
+| Metro Area    | ZIP Codes                  |
+| ------------- | -------------------------- |
+| Chicago       | 60115, 60601, 60602, 60611 |
+| New York      | 10001, 10002, 11201        |
+| San Francisco | 94105                      |
+| Dallas        | 75201                      |
+| Atlanta       | 30301                      |
 
----
+**Appliance Specialties**: Refrigerator, Washer, Dryer, Dishwasher, Oven, HVAC
 
-## 🔧 API Endpoints
+## �🔧 API Endpoints
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check |
-| `/twilio/voice` | POST | Incoming call webhook |
-| `/twilio/voice/continue` | POST | Conversation continuation |
-| `/upload/{token}` | GET | Upload page (HTML) |
-| `/upload/{token}` | POST | Image upload handler |
-| `/upload/status/{call_sid}` | GET | Upload/analysis status |
+| Endpoint                      | Method | Description               |
+| ----------------------------- | ------ | ------------------------- |
+| `/health`                   | GET    | Health check              |
+| `/twilio/voice`             | POST   | Incoming call handler     |
+| `/twilio/voice/continue`    | POST   | Conversation continuation |
+| `/upload/{token}`           | GET    | Upload page               |
+| `/upload/{token}`           | POST   | Image upload handler      |
+| `/upload/status/{call_sid}` | GET    | Upload status check       |
 
----
-
-## 🧪 Testing the System
-
-### Demo Script
-
-1. **Call the Twilio number** and wait for greeting
-2. **Say your name** when prompted
-3. **Describe an issue:** "My refrigerator is making a loud humming noise"
-4. **Follow troubleshooting steps** - say "yes" or "no" to each
-5. **When offered image upload**, say "upload a photo"
-6. **Spell your email:** "j o h n at gmail dot com"
-7. **Confirm the email** when read back
-8. **Check your email** and upload an appliance photo
-9. **Listen to the AI analysis** of your image
-10. **Say "schedule a technician"** to test booking
-11. **Provide ZIP code:** 60601 (Chicago coverage)
-12. **Select a time slot:** "Option 1"
-
-### Test ZIP Codes
-
-```
-60601, 60602, 60611, 60115  (Chicago)
-10001, 10002, 11201         (New York)
-94105                       (San Francisco)
-75201                       (Dallas)
-30301                       (Atlanta)
-```
-
----
-
-## 🐳 Docker Commands
-
-```bash
-# Start all services
-docker-compose up --build
-
-# Start in background
-docker-compose up -d --build
-
-# View logs
-docker-compose logs -f
-
-# View specific service logs
-docker-compose logs -f voice-ai
-docker-compose logs -f twilio-config
-
-# Stop all services
-docker-compose down
-
-# Reset database (delete volume)
-docker-compose down -v
-docker-compose up --build
-```
-
----
-
-## 🖥️ Local Development (Without Docker)
+## 🧪 Local Development (Without Docker)
 
 ```bash
 # Create virtual environment
 python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+source venv/bin/activate  # or `venv\Scripts\activate` on Windows
 
 # Install dependencies
 pip install -r requirements.txt
 
-# Start MySQL locally and update .env with credentials
-
-# Run the application
+# Run server
 uvicorn app.main:app --reload --port 8000
-
-# In another terminal, start ngrok
-ngrok http 8000
-
-# Update APP_BASE_URL in .env with ngrok URL
-# Configure Twilio webhook manually
 ```
 
----
+## 📊 Database
 
-## 🔒 Security
+**MySQL 8.0** with automatic initialization and connection retry logic.
 
-- ✅ API keys loaded from environment variables only
-- ✅ `.env` files excluded from Git and Docker images
-- ✅ Upload tokens expire after 24 hours
-- ✅ No sensitive data logged in production
-- ✅ Secure HTTPS via ngrok tunnel
+### Docker Setup (Recommended)
+- MySQL runs in a separate container
+- Database schema auto-created via `init.sql`
+- Persistent volume for data retention
+- Health checks ensure MySQL is ready before app starts
 
----
+### Local Development
+```bash
+# Make sure MySQL is running locally
+# Update app/.env with your local credentials:
+DB_HOST=localhost
+DB_USER=your_mysql_user
+DB_PASSWORD=your_mysql_password
 
-## 📊 Monitoring
+# Run the app
+uvicorn app.main:app --reload --port 8000
+```
 
-| Dashboard | URL |
-|-----------|-----|
-| **ngrok Inspector** | http://localhost:4040 |
-| **Health Check** | http://localhost:8000/health |
-| **Docker Logs** | `docker-compose logs -f` |
+### Connection Resilience
+- Automatic retry mechanism (5 attempts with 2s delay)
+- Pool pre-ping to verify connections
+- Connection recycling every hour
 
----
+## 🔒 Security Notes
 
-## 🤝 Contributing
+- API keys are loaded from environment variables only
+- `.env` files are excluded from Docker images
+- Sensitive data never logged in production
+- Upload tokens expire after 24 hours
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
+## 📞 How to Review This Submission
 
----
+**Live Demo Phone Number:** `[YOUR_TWILIO_NUMBER]` *(update before submission)*
 
-## 📄 License
+**Uptime Window:** Available during business hours (9 AM - 6 PM CST) or by request.
 
-MIT License - See [LICENSE](LICENSE) for details.
+### Suggested Demo Script
 
----
+1. **Call the number** and wait for greeting
+2. **Say:** "My refrigerator is making a loud noise"
+3. **Follow Tier 1-2 prompts** (appliance classification, symptoms)
+4. **When asked for email**, spell it out: "j o h n at gmail dot com"
+5. **Check email** for upload link, upload any appliance photo
+6. **Observe Tier 3** visual analysis response
+7. **Say "schedule a technician"** to test Tier 4 booking
+8. **Provide ZIP code:** 60601, 10001, or 94105 for coverage
 
-## 👨‍💻 Author
+### Test ZIP Codes with Technician Coverage
 
-**Kasim Ajji**
-
-Built for the Sears Home Services AI Engineer Assessment
+`60601`, `60602`, `60611`, `60115`, `10001`, `10002`, `11201`, `94105`, `75201`, `30301`
