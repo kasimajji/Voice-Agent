@@ -443,20 +443,21 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
         if prompt:
             gather = response.gather(
                 input="speech",
-                timeout=15,
-                speech_timeout="5",
+                timeout=12,
+                speech_timeout="3",
                 action=VOICE_CONTINUE_URL,
                 method="POST",
             bargeIn=False
             )
             # Use the LLM-generated symptom summary in the response
             summary = state["symptom_summary"]
-            gather.append(create_ssml_say(
+            agent_text = (
                 f"Okay{name_phrase}, I understand. {summary}. "
                 f"Let me help you with a quick troubleshooting step. {prompt} "
-                "Take your time, and when you're ready, just say 'yes' if that helped or 'no' if you're still having the issue.",
-                voice="professional", rate="slow"
-            ))
+                "Take your time, and when you're ready, just say 'yes' if that helped or 'no' if you're still having the issue."
+            )
+            log_conversation(call_sid, "AGENT", agent_text, "troubleshoot")
+            gather.append(create_ssml_say(agent_text, voice="professional", rate="slow"))
             response.redirect(VOICE_CONTINUE_URL)
         else:
             state["step"] = "done"
@@ -480,12 +481,13 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             
             log_call_end(call_sid, resolved=True, reason="Troubleshooting successful")
             
-            response.append(create_ssml_say(
+            agent_text = (
                 f"Wonderful{name_phrase}! I'm so glad that worked! "
                 "If you ever have any other issues, don't hesitate to give us a call. "
-                "Have a great day, and thank you for choosing Sears Home Services. Take care!",
-                voice="cheerful", rate="normal"
-            ))
+                "Have a great day, and thank you for choosing Sears Home Services. Take care!"
+            )
+            log_conversation(call_sid, "AGENT", agent_text, "troubleshoot")
+            response.append(create_ssml_say(agent_text, voice="cheerful", rate="normal"))
             response.hangup()
         else:
             prompt = get_next_troubleshooting_prompt(state)
@@ -494,17 +496,18 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             if prompt:
                 gather = response.gather(
                     input="speech",
-                    timeout=15,
-                    speech_timeout="5",
+                    timeout=12,
+                    speech_timeout="3",
                     action=VOICE_CONTINUE_URL,
                     method="POST",
                 bargeIn=False
                 )
-                gather.append(create_ssml_say(
+                agent_text = (
                     f"Alright{name_phrase}, no problem. Let's try something else. {prompt} "
-                    "Again, take your time and let me know if that helps.",
-                    voice="professional", rate="slow"
-                ))
+                    "Again, take your time and let me know if that helps."
+                )
+                log_conversation(call_sid, "AGENT", agent_text, "troubleshoot")
+                gather.append(create_ssml_say(agent_text, voice="professional", rate="slow"))
                 response.redirect(VOICE_CONTINUE_URL)
             else:
                 # Offer Tier 3 image upload option before scheduling
@@ -515,21 +518,22 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 
                 gather = response.gather(
                     input="speech",
-                    timeout=10,
-                    speech_timeout="5",
+                    timeout=8,
+                    speech_timeout="3",
                     action=VOICE_CONTINUE_URL,
                     method="POST",
                 bargeIn=False
                 )
-                gather.append(create_ssml_say(
+                agent_text = (
                     f"I understand{name_phrase}, sometimes these issues need a closer look. "
                     "I have a couple of options that might help. "
                     "I can send you a link to upload a photo of your appliance, "
                     "and our AI will analyze it and give you more specific advice. "
                     "Or, if you'd prefer, I can help you schedule a technician to come take a look in person. "
-                    "What would you prefer - upload a photo, or schedule a technician visit?",
-                    voice="default", rate="normal"
-                ))
+                    "What would you prefer - upload a photo, or schedule a technician visit?"
+                )
+                log_conversation(call_sid, "AGENT", agent_text, "offer_image_upload")
+                gather.append(create_ssml_say(agent_text, voice="default", rate="normal"))
                 response.redirect(VOICE_CONTINUE_URL)
     
     elif current_step == "offer_image_upload":

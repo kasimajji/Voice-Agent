@@ -88,36 +88,51 @@ def llm_extract_name(speech_text: str) -> str:
     # Use LLM to decode the name phonetically
     if model:
         try:
-            prompt = f"""A customer on a phone call said their name. The speech-to-text captured: "{speech_text}"
+            prompt = f"""Extract the person's first name from this phone call greeting.
 
-Decode what name they actually said. Consider:
-- Phonetic similarities (Cassie/Kasi/Kathy, John/Jon/Juan)
-- Speech-to-text errors (letters may be wrong)
-- The customer IS saying a name, decode it
+Speech: "{speech_text}"
 
-Return ONLY the first name, nothing else. Just the name:"""
+Rules:
+- Return ONLY the first name, nothing else
+- Look for patterns like "my name is X", "this is X", "I'm X"
+- Ignore greetings like "hey", "hi", "how are you"
+- If multiple names possible, pick the one after "name is" or "I'm"
+
+Just the name:"""
 
             response = model.generate_content(
                 prompt,
-                generation_config={"temperature": 0.0, "max_output_tokens": 20}
+                generation_config={"temperature": 0.0, "max_output_tokens": 10}
             )
             
-            # Handle multi-part responses
+            # Handle multi-part responses safely
+            raw_result = ""
             try:
                 raw_result = response.text.strip()
-            except:
-                if response.candidates and response.candidates[0].content.parts:
-                    raw_result = response.candidates[0].content.parts[0].text.strip()
-                else:
-                    raw_result = ""
+            except Exception as e:
+                logger.debug(f"Multi-part response: {e}")
+                try:
+                    if response.candidates:
+                        for candidate in response.candidates:
+                            if candidate.content and candidate.content.parts:
+                                for part in candidate.content.parts:
+                                    if hasattr(part, 'text') and part.text:
+                                        raw_result = part.text.strip()
+                                        break
+                                if raw_result:
+                                    break
+                except Exception as e2:
+                    logger.debug(f"Cannot extract from candidates: {e2}")
             
-            name = raw_result.strip('"\'.,!?').title()
-            
-            # Validate result
-            invalid_responses = {"there", "unknown", "none", "n/a", "na", "", "friend"}
-            if name and name.lower() not in invalid_responses and len(name) < 20:
-                logger.debug(f"Name decoded by LLM: '{name}' from '{speech_text}'")
-                return name
+            if raw_result:
+                logger.debug(f"Raw LLM output: '{raw_result}'")
+                name = raw_result.strip('"\'.,!?').title()
+                
+                # Validate result
+                invalid_responses = {"there", "unknown", "none", "n/a", "na", "", "friend", "hey", "hi", "hello"}
+                if name and name.lower() not in invalid_responses and len(name) < 20 and ' ' not in name:
+                    logger.debug(f"Name decoded by LLM: '{name}' from '{speech_text}'")
+                    return name
                 
         except Exception as e:
             logger.warning(f"LLM name extraction failed: {e}")

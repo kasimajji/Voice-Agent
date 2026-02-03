@@ -213,6 +213,7 @@ Sears Home Services Team
     
     if not sendgrid_key:
         logger.info(f"[DEV MODE] Email would be sent to: {email}")
+        logger.info(f"[DEV MODE] 📎 UPLOAD LINK: {upload_url}")
         logger.debug(f"Subject: {subject}")
         logger.debug(f"Body: {body[:200]}...")
         return True
