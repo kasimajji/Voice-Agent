@@ -82,7 +82,7 @@ def say_with_logging(text: str, call_sid: str = "", step: str = None,
     return create_ssml_say(text)
 
 
-def extract_email_from_speech(speech_text: str, call_sid: str = "") -> str | None:
+def extract_email_from_speech(speech_text: str, call_sid: str = "") -> str:
     """
     Extract email from Twilio speech-to-text using AI.
     
@@ -92,7 +92,7 @@ def extract_email_from_speech(speech_text: str, call_sid: str = "") -> str | Non
     - Common phrasings: "at the rate", "dot com"
     
     Returns:
-        Extracted email string if found, None otherwise.
+        Extracted or constructed email string. Never returns None.
     """
     log_conversation(call_sid, "EMAIL_EXTRACT", f"Raw input: {speech_text}", "collect_email")
     email = llm_extract_email(speech_text)
@@ -613,90 +613,38 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
     # =========================================================================
     
     elif current_step == "collect_email":
-        # ISSUE 1: Extract and validate email, then move to confirmation
+        # ISSUE 1: Extract email (always returns a value), then move to confirmation
         email = extract_email_from_speech(speech_result, call_sid)
         
-        if email and validate_email(email):
-            # Store as pending - NOT confirmed yet
-            state["pending_email"] = email
-            state["step"] = "confirm_email"
-            # Only initialize counter on first entry, preserve across retries
-            if "email_confirm_attempts" not in state:
-                state["email_confirm_attempts"] = 0
-            update_state(call_sid, state)
-            
-            # Spell back the email for confirmation
-            spelled_email = spell_email_for_speech(email)
-            
-            logger.info(f"Email captured: {email}, awaiting confirmation", extra={"call_sid": call_sid, "step": "collect_email"})
-            
-            # Confirmation gather - yes/no response
-            gather = response.gather(
-                input="speech",
-                timeout=7,
-                speech_timeout="3",
-                action=VOICE_CONTINUE_URL,
-                method="POST",
-                bargeIn=False,
-                language="en-US"
-            )
-            gather.append(create_ssml_say(
-                f"I heard {spelled_email}. "
-                "Is that correct? Please say yes or no.",
-                voice="default", rate="slow"
-            ))
-            response.redirect(VOICE_CONTINUE_URL)
+        # Store as pending - user will confirm
+        state["pending_email"] = email
+        state["step"] = "confirm_email"
+        # Only initialize counter on first entry, preserve across retries
+        if "email_confirm_attempts" not in state:
+            state["email_confirm_attempts"] = 0
+        update_state(call_sid, state)
         
-        else:
-            state["email_attempts"] = state.get("email_attempts", 0) + 1
-            update_state(call_sid, state)
-            
-            logger.debug(f"Email attempt {state['email_attempts']}, extracted: {email}", extra={"call_sid": call_sid, "step": "collect_email"})
-            
-            if state["email_attempts"] <= 3:
-                # Retry email capture with enhanced Gather settings
-                gather = response.gather(
-                    input="speech",
-                    timeout=10,  # Longer timeout for spelling
-                    speech_timeout="4",  # More pause tolerance
-                    action=VOICE_CONTINUE_URL,
-                    method="POST",
-                    bargeIn=False,
-                    language="en-US",
-                    hints="gmail.com, yahoo.com, outlook.com, hotmail.com, icloud.com, "
-                          "at gmail dot com, dot com, dot net, at the rate, "
-                          "zero, one, two, three, four, five, six, seven, eight, nine, "
-                          "0, 1, 2, 3, 4, 5, 6, 7, 8, 9"
-                )
-                gather.append(create_ssml_say(
-                    "I'm sorry, I didn't catch a valid email address. "
-                    "Please spell your email slowly, letter by letter. "
-                    "For example: k, a, s, i, dot, m, a, j, j, i, at, gmail, dot, com.",
-                    voice="empathetic", rate="slow"
-                ))
-                response.redirect(VOICE_CONTINUE_URL)
-            else:
-                # Too many failed attempts, fall back to scheduling
-                logger.warning("Email capture failed after 3 attempts, falling back to scheduling", extra={"call_sid": call_sid, "step": "collect_email"})
-                state["step"] = "collect_zip"
-                update_state(call_sid, state)
-                
-                gather = response.gather(
-                    input="speech",
-                    timeout=5,
-                    speech_timeout="3",
-                    action=VOICE_CONTINUE_URL,
-                    method="POST",
-                    bargeIn=False,
-                    language="en-US"
-                )
-                gather.append(create_ssml_say(
-                    "I'm having trouble capturing the email. "
-                    "Let me help you schedule a technician instead. "
-                    "What is your ZIP code?",
-                    voice="empathetic", rate="normal"
-                ))
-                response.redirect(VOICE_CONTINUE_URL)
+        # Spell back the email for confirmation
+        spelled_email = spell_email_for_speech(email)
+        
+        logger.info(f"Email captured: {email}, awaiting confirmation", extra={"call_sid": call_sid, "step": "collect_email"})
+        
+        # Confirmation gather - yes/no response
+        gather = response.gather(
+            input="speech",
+            timeout=7,
+            speech_timeout="3",
+            action=VOICE_CONTINUE_URL,
+            method="POST",
+            bargeIn=False,
+            language="en-US"
+        )
+        gather.append(create_ssml_say(
+            f"I heard {spelled_email}. "
+            "Is that correct? Please say yes or no.",
+            voice="default", rate="slow"
+        ))
+        response.redirect(VOICE_CONTINUE_URL)
     
     elif current_step == "confirm_email":
         # ISSUE 1: User confirms or rejects the email

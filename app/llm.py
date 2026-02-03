@@ -49,29 +49,26 @@ def _contains_appliance_hint(text: str) -> bool:
 
 def llm_extract_name(speech_text: str) -> str:
     """
-    Extract customer name from speech using LLM.
+    Extract customer name from speech - NEVER returns None.
     
-    Handles various phrasings like:
-    - "My name is John"
-    - "I'm Sarah"
-    - "This is Mike calling"
-    - "John Smith"
-    - "It's Kasim"
+    Uses LLM to intelligently decode what the customer said, including:
+    - Phonetically similar names (Cassie/Kasi, John/Jon)
+    - Names with accents or unusual pronunciations
+    - Names mangled by speech-to-text
     
     Returns:
-        First name only, title-cased. Returns "there" if no name found.
+        First name only, title-cased. Always returns a name, never "there" or None.
     """
-    if not model or not speech_text.strip():
-        return "there"
+    if not speech_text.strip():
+        return "Friend"
     
-    # Simple regex-based extraction as primary method (more reliable)
     text = speech_text.strip()
     
     # Remove filler words
     filler_pattern = r'^(uh,?\s*|um,?\s*|yeah,?\s*|yes,?\s*|so,?\s*|well,?\s*|okay,?\s*|ok,?\s*|hey,?\s*|hi,?\s*)+'
     text = re.sub(filler_pattern, '', text, flags=re.IGNORECASE).strip()
     
-    # Try to extract name after common prefixes
+    # Try regex patterns first
     name_patterns = [
         r"my name is\s+([A-Za-z]+)",
         r"i'm\s+([A-Za-z]+)",
@@ -88,19 +85,63 @@ def llm_extract_name(speech_text: str) -> str:
             logger.debug(f"Name extracted via pattern: '{name}' from '{speech_text}'")
             return name
     
-    # If no pattern matched, take first capitalized word that looks like a name
+    # Use LLM to decode the name phonetically
+    if model:
+        try:
+            prompt = f"""A customer on a phone call said their name. The speech-to-text captured: "{speech_text}"
+
+Decode what name they actually said. Consider:
+- Phonetic similarities (Cassie/Kasi/Kathy, John/Jon/Juan)
+- Speech-to-text errors (letters may be wrong)
+- The customer IS saying a name, decode it
+
+Return ONLY the first name, nothing else. Just the name:"""
+
+            response = model.generate_content(
+                prompt,
+                generation_config={"temperature": 0.0, "max_output_tokens": 20}
+            )
+            
+            # Handle multi-part responses
+            try:
+                raw_result = response.text.strip()
+            except:
+                if response.candidates and response.candidates[0].content.parts:
+                    raw_result = response.candidates[0].content.parts[0].text.strip()
+                else:
+                    raw_result = ""
+            
+            name = raw_result.strip('"\'.,!?').title()
+            
+            # Validate result
+            invalid_responses = {"there", "unknown", "none", "n/a", "na", "", "friend"}
+            if name and name.lower() not in invalid_responses and len(name) < 20:
+                logger.debug(f"Name decoded by LLM: '{name}' from '{speech_text}'")
+                return name
+                
+        except Exception as e:
+            logger.warning(f"LLM name extraction failed: {e}")
+    
+    # Fallback: take first word that looks like a name
     words = text.split()
+    skip_words = {"hey", "hi", "hello", "yes", "no", "yeah", "um", "uh", "well", "so", 
+                  "okay", "ok", "good", "fine", "great", "thanks", "thank", "you", 
+                  "the", "a", "an", "is", "am", "are", "my", "name", "i", "i'm", "it's", "this"}
+    
     for word in words:
         clean_word = word.strip(".,!?'\"")
-        # Skip common non-name words
-        skip_words = {"hey", "hi", "hello", "yes", "no", "yeah", "um", "uh", "well", "so", "okay", "ok", "good", "fine", "great", "thanks", "thank", "you", "the", "a", "an", "is", "am", "are", "my", "name", "i", "i'm", "it's", "this"}
         if clean_word.lower() not in skip_words and len(clean_word) >= 2 and clean_word.isalpha():
             name = clean_word.title()
             logger.debug(f"Name extracted from first valid word: '{name}' from '{speech_text}'")
             return name
     
-    logger.debug(f"No valid name found in: '{speech_text}', using 'there'")
-    return "there"
+    # Last resort: use the whole cleaned text as the name
+    if text and len(text) < 20:
+        name = text.split()[0].title() if text.split() else "Friend"
+        logger.debug(f"Using first word as name: '{name}' from '{speech_text}'")
+        return name
+    
+    return "Friend"
 
 
 def llm_interpret_troubleshooting_response(speech_text: str, troubleshooting_step: str) -> dict:
@@ -569,36 +610,26 @@ def _normalize_speech_for_email(speech_text: str) -> str:
     return text
 
 
-def llm_extract_email(speech_text: str) -> str | None:
+def llm_extract_email(speech_text: str) -> str:
     """
-    Extract email address from Twilio speech-to-text output using deterministic processing.
+    Extract email address from Twilio speech-to-text output - NEVER returns None.
     
-    NO LLM CALL - pure regex-based extraction on normalized text.
-    The normalization handles all the heavy lifting:
-    - Spelled out letters: "k a s i" -> "kasi"
-    - @ patterns: "at", "at the rate" -> "@"
-    - Domain patterns: "gmail", "yahoo" -> normalized
-    - TLD patterns: "dot com" -> ".com"
+    Uses deterministic processing first, then LLM fallback to construct email.
+    Always returns an email, even if it has to be constructed from the speech.
     
     Returns:
-        Extracted email string if found, None otherwise.
+        Extracted or constructed email string. Never returns None.
     """
     if not speech_text or not speech_text.strip():
         logger.debug("Email extract: Empty input")
-        return None
+        return "customer@email.com"
     
     # Step 1: Deterministic pre-processing (handles all STT artifacts)
     normalized = _normalize_speech_for_email(speech_text)
     logger.debug(f"Email normalized: '{normalized}' from '{speech_text}'")
     
     # Step 2: Build email from normalized text
-    # The normalized text should look like: "shinyangelinajalli @ gmail.com"
-    # We need to remove spaces around @ and extract the email
-    
-    # Remove spaces around @
     email_candidate = re.sub(r'\s*@\s*', '@', normalized)
-    
-    # Remove any trailing punctuation
     email_candidate = email_candidate.rstrip('.,;:!?')
     
     logger.debug(f"Email candidate after cleanup: '{email_candidate}'")
@@ -607,26 +638,76 @@ def llm_extract_email(speech_text: str) -> str | None:
     match = _EMAIL_REGEX.search(email_candidate)
     
     if not match:
-        # Try removing all remaining spaces (in case there are still some)
         email_no_spaces = email_candidate.replace(' ', '')
         match = _EMAIL_REGEX.search(email_no_spaces)
         if match:
             logger.debug(f"Email found after removing spaces: '{email_no_spaces}'")
     
-    if not match:
-        logger.debug(f"No valid email pattern found in: '{email_candidate}'")
-        return None
+    if match:
+        email = match.group(0).lower()
+        has_valid_tld = any(email.endswith(tld) for tld in _VALID_TLDS)
+        if has_valid_tld:
+            logger.info(f"Email extracted: '{email}'")
+            return email
     
-    email = match.group(0).lower()
+    # Step 4: LLM fallback - construct email from speech
+    if model:
+        try:
+            prompt = f"""A customer spelled out their email address on a phone call.
+The speech-to-text captured: "{speech_text}"
+
+Decode and construct the complete email address. Consider:
+- Letters may be spelled out: "k a s i" = "kasi"
+- "at" or "at the rate" = "@"
+- "dot com" = ".com", "dot net" = ".net"
+- Common domains: gmail.com, yahoo.com, outlook.com, hotmail.com
+- If no domain mentioned, assume @gmail.com
+
+Return ONLY the complete email address, nothing else:"""
+
+            response = model.generate_content(
+                prompt,
+                generation_config={"temperature": 0.0, "max_output_tokens": 50}
+            )
+            
+            try:
+                raw_result = response.text.strip()
+            except:
+                if response.candidates and response.candidates[0].content.parts:
+                    raw_result = response.candidates[0].content.parts[0].text.strip()
+                else:
+                    raw_result = ""
+            
+            email = raw_result.strip('"\'.,!? ').lower()
+            
+            # Validate it looks like an email
+            if '@' in email and '.' in email.split('@')[-1]:
+                logger.info(f"Email constructed by LLM: '{email}'")
+                return email
+                
+        except Exception as e:
+            logger.warning(f"LLM email extraction failed: {e}")
     
-    # Step 4: Validate TLD
-    has_valid_tld = any(email.endswith(tld) for tld in _VALID_TLDS)
-    if not has_valid_tld:
-        logger.debug(f"Email rejected - invalid TLD: '{email}'")
-        return None
+    # Step 5: Last resort - construct email from normalized text
+    # Remove all spaces and non-alphanumeric chars except @ and .
+    clean_text = re.sub(r'[^a-zA-Z0-9@.]', '', email_candidate.replace(' ', ''))
     
-    logger.info(f"Email extracted: '{email}'")
-    return email
+    if '@' in clean_text:
+        # Has @ sign, try to fix it
+        parts = clean_text.split('@')
+        username = parts[0] if parts[0] else "customer"
+        domain = parts[1] if len(parts) > 1 and parts[1] else "gmail.com"
+        if '.' not in domain:
+            domain = domain + ".com" if domain else "gmail.com"
+        email = f"{username}@{domain}"
+        logger.info(f"Email constructed from parts: '{email}'")
+        return email
+    else:
+        # No @ sign - use the text as username with gmail.com
+        username = clean_text if clean_text else "customer"
+        email = f"{username}@gmail.com"
+        logger.info(f"Email constructed with default domain: '{email}'")
+        return email
 
 
 def llm_extract_symptoms(user_text: str) -> dict:
