@@ -11,13 +11,25 @@ APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8000").rstrip("/")
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
 GEMINI_MODEL = "gemini-2.0-flash"
 
-# TTS Configuration — Polly Neural voices sound significantly more natural than standard
-# Available neural voices: Polly.Joanna-Neural, Polly.Matthew-Neural, Polly.Salli-Neural
-TTS_VOICE = os.getenv("TTS_VOICE", "Polly.Joanna-Neural")
+# Google Cloud credentials (service account JSON for STT/TTS)
+GCP_CREDENTIALS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 
-# STT Configuration — phone_call model is optimized for telephony audio
-STT_SPEECH_MODEL = "phone_call"
+# TTS Configuration — Google WaveNet voices for natural-sounding speech
+# Twilio supports Google WaveNet voices directly in <Say> element
+# Available: Google.en-US-Wavenet-A (male), Google.en-US-Wavenet-C (female),
+#            Google.en-US-Wavenet-D (male), Google.en-US-Wavenet-F (female)
+TTS_VOICE = os.getenv("TTS_VOICE", "Google.en-US-Wavenet-F")
+
+# STT Configuration
+# Gather-based STT (fallback) — phone_call model for telephony audio
+STT_SPEECH_MODEL = os.getenv("STT_SPEECH_MODEL", "phone_call")
 STT_ENHANCED = True
+
+# Google STT v2 streaming — used via Twilio Media Streams WebSocket
+USE_STREAMING_STT = os.getenv("USE_STREAMING_STT", "true").lower() == "true"
+STT_CONFIDENCE_THRESHOLD = float(os.getenv("STT_CONFIDENCE_THRESHOLD", "0.4"))
+STT_SILENCE_TIMEOUT_MS = int(os.getenv("STT_SILENCE_TIMEOUT_MS", "800"))
+STT_LANGUAGE_CODE = os.getenv("STT_LANGUAGE_CODE", "en-US")
 
 # Use basic logging here since logging_config may not be loaded yet
 _config_logger = logging.getLogger("voice_agent.config")

@@ -37,6 +37,7 @@ services:
       - DB_NAME=voice_ai
     volumes:
       - ./uploads:/app/uploads
+      - ./app/.secrets:/app/.secrets:ro
     depends_on:
       db:
         condition: service_healthy

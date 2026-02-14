@@ -1,9 +1,15 @@
 import re
+import time
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 from twilio.twiml.voice_response import VoiceResponse, Say
 
-from .config import APP_BASE_URL, TTS_VOICE, STT_SPEECH_MODEL, get_base_url_from_request
+from .config import (
+    APP_BASE_URL, TTS_VOICE, STT_SPEECH_MODEL,
+    USE_STREAMING_STT, STT_CONFIDENCE_THRESHOLD,
+    get_base_url_from_request,
+)
+from .stt_stream import get_transcript, clear_transcript, wait_for_transcript
 from .conversation import (
     get_state,
     update_state,
@@ -26,7 +32,8 @@ from .image_service import (
     build_upload_url,
     send_upload_email,
     validate_email,
-    get_upload_status_by_call_sid
+    get_upload_status_by_call_sid,
+    reset_upload_for_reupload,
 )
 from .logging_config import (
     get_logger,
@@ -53,6 +60,25 @@ def _get_continue_url(request: Request) -> str:
     """
     base = get_base_url_from_request(request)
     return f"{base}/twilio/voice/continue"
+
+
+def _get_stream_url(request: Request) -> str:
+    """Compute the WebSocket URL for Twilio Media Streams."""
+    base = get_base_url_from_request(request)
+    # Convert https:// to wss:// for WebSocket
+    ws_base = base.replace("https://", "wss://").replace("http://", "ws://")
+    return f"{ws_base}/twilio/media-stream"
+
+
+def _add_media_stream(response: VoiceResponse, stream_url: str):
+    """
+    Add a <Start><Stream> element to the TwiML response.
+    This starts real-time audio streaming to our Google STT endpoint
+    alongside the normal Gather-based flow.
+    """
+    if USE_STREAMING_STT:
+        start = response.start()
+        start.stream(url=stream_url)
 
 
 def _build_gather(response: VoiceResponse, action_url: str, timeout: int = 5,
@@ -209,6 +235,10 @@ async def voice_entry(request: Request):
     
     response = VoiceResponse()
     
+    # Start real-time audio streaming to Google STT (alongside Gather fallback)
+    stream_url = _get_stream_url(request)
+    _add_media_stream(response, stream_url)
+    
     # Natural greeting - warm and friendly
     greeting_text = (
         "Hi there! Thanks for calling Sears Home Services. "
@@ -235,9 +265,48 @@ async def voice_continue(request: Request):
         
         call_sid = form_data.get("CallSid", "")
         speech_result = form_data.get("SpeechResult", "")
+        twilio_confidence = form_data.get("Confidence", "")
         
         state = get_state(call_sid)
         current_step = state.get("step", "unknown")
+        
+        # ── Confidence gating ──
+        # Reject low-confidence Twilio transcripts as noise (fixes phantom captures)
+        # BUT skip gating for steps that expect short/numeric input — those naturally
+        # have lower Twilio confidence scores and should not be rejected.
+        _skip_gating_steps = {
+            "collect_zip", "confirm_zip", "confirm_email", "confirm_resolution",
+            "choose_slot", "collect_time_pref", "offer_troubleshoot_or_schedule",
+            "offer_image_upload", "after_analysis",
+        }
+        if speech_result and twilio_confidence and current_step not in _skip_gating_steps:
+            try:
+                conf = float(twilio_confidence)
+                if conf < STT_CONFIDENCE_THRESHOLD:
+                    logger.info(
+                        f"Rejected low-confidence speech: '{speech_result}' (conf={conf:.2f})",
+                        extra={"call_sid": call_sid},
+                    )
+                    speech_result = ""
+            except ValueError:
+                pass
+        turn_start = state.get("_turn_start_ts", 0.0)
+        
+        # ── Google STT as fallback when Twilio returns empty/silence ──
+        # Only use Google STT transcript if Twilio didn't capture anything useful.
+        # Google STT via silence-based batching lags behind Twilio's real-time Gather,
+        # so we only use it as a safety net, not as a replacement.
+        if USE_STREAMING_STT and call_sid:
+            stream_transcript = get_transcript(call_sid, not_before=turn_start)
+            if not speech_result.strip() and stream_transcript and stream_transcript.get("text"):
+                stream_text = stream_transcript["text"]
+                stream_conf = stream_transcript.get("confidence", 0.0)
+                logger.info(
+                    f"Google STT fallback (Twilio was empty): '{stream_text[:60]}' (conf={stream_conf:.2f})",
+                    extra={"call_sid": call_sid},
+                )
+                speech_result = stream_text
+            clear_transcript(call_sid)
         
         # Log customer speech
         log_conversation(call_sid, "CUSTOMER", speech_result or "(silence)", current_step)
@@ -382,7 +451,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             )
         log_conversation(call_sid, "AGENT", greeting_text, "greet_ask_name")
         
-        gather = _build_gather(response, continue_url, timeout=10, speech_timeout="5")
+        gather = _build_gather(response, continue_url, timeout=10, speech_timeout="auto")
         gather.append(create_ssml_say(greeting_text))
         response.redirect(continue_url)
     
@@ -480,7 +549,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             update_state(call_sid, state)
             
             if state["understand_attempts"] <= 2:
-                gather = _build_gather(response, continue_url, timeout=10, speech_timeout="5")
+                gather = _build_gather(response, continue_url, timeout=10, speech_timeout="auto")
                 gather.append(create_ssml_say(
                     f"I'd love to help{name_phrase}! Could you tell me which appliance is giving you trouble "
                     "and what's happening with it? For example, you could say "
@@ -949,6 +1018,22 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             response.redirect(continue_url)
             return Response(content=str(response), media_type="application/xml")
         
+        # Handle "send email again" / "resend" requests
+        if any(kw in text_lower for kw in ["send", "resend", "email again", "link again", "again"]):
+            upload_url = reset_upload_for_reupload(call_sid)
+            if upload_url:
+                email = state.get("customer_email", "")
+                if email:
+                    send_upload_email(email, upload_url, state.get("appliance_type"))
+                    logger.info(f"Re-sent upload email to {email}", extra={"call_sid": call_sid, "step": "waiting_for_upload"})
+                
+                gather = _build_gather(response, continue_url, timeout=30, speech_timeout="3")
+                agent_text = "I've re-sent the upload link to your email. Please upload a new photo and say done when you're finished, or say skip to schedule a technician."
+                log_conversation(call_sid, "AGENT", agent_text, "waiting_for_upload")
+                gather.append(create_ssml_say(agent_text))
+                response.redirect(continue_url)
+                return Response(content=str(response), media_type="application/xml")
+        
         if "yes" in text_lower or "more time" in text_lower or "wait" in text_lower or "minute" in text_lower:
             state["upload_wait_attempts"] = 0
             update_state(call_sid, state)
@@ -1074,11 +1159,18 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             
             logger.info("Image was not an appliance, asking for re-upload", extra={"call_sid": call_sid, "step": "speak_analysis"})
             
-            gather = _build_gather(response, continue_url, timeout=15, speech_timeout="3")
+            # Reset the upload token so the old analysis doesn't trigger auto-detect loop
+            upload_url = reset_upload_for_reupload(call_sid)
+            reupload_msg = ""
+            if upload_url:
+                reupload_msg = " I've re-sent the upload link to your email. "
+            
+            gather = _build_gather(response, continue_url, timeout=30, speech_timeout="3")
             gather.append(create_ssml_say(
                 f"The image doesn't appear to show the {appliance}. "
                 "Please upload a clear photo of the appliance itself, "
-                "especially showing any error codes or the problem area. "
+                "especially showing any error codes or the problem area."
+                f"{reupload_msg}"
                 "Say done when you've uploaded a new photo, or skip to schedule a technician."
             ))
             response.redirect(continue_url)
@@ -1380,5 +1472,9 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             "I'm sorry, something went wrong. Please call back later. Goodbye."
         ))
         response.hangup()
+    
+    # Stamp turn start time so the next voice_continue can filter stale Google STT transcripts
+    state["_turn_start_ts"] = time.time()
+    update_state(call_sid, state)
     
     return Response(content=str(response), media_type="application/xml")

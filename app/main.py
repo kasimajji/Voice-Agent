@@ -4,11 +4,14 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from starlette.websockets import WebSocket
+
 from app.twilio_routes import router as twilio_router
 from app.upload_routes import router as upload_router
 from .db import Base, engine
 from . import models
 from .seed import seed_data
+from .stt_stream import handle_media_stream
 from .logging_config import get_logger
 
 logger = get_logger("main")
@@ -29,6 +32,12 @@ def on_startup():
     Base.metadata.create_all(bind=engine)
     seed_data()
     logger.info("✅ Database initialized and seeded")
+
+
+@app.websocket("/twilio/media-stream")
+async def media_stream_endpoint(websocket: WebSocket):
+    """Twilio Media Streams WebSocket endpoint for real-time STT."""
+    await handle_media_stream(websocket)
 
 
 @app.get("/health")

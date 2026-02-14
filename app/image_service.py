@@ -134,6 +134,34 @@ def update_token_analysis(
         db.close()
 
 
+def reset_upload_for_reupload(call_sid: str) -> Optional[str]:
+    """
+    Reset the most recent upload token for a call so the customer can re-upload.
+    Clears analysis fields and used_at so the token can be reused.
+    Returns the upload URL if successful, None otherwise.
+    """
+    db = SessionLocal()
+    try:
+        upload_token = db.query(ImageUploadToken).filter(
+            ImageUploadToken.call_sid == call_sid
+        ).order_by(ImageUploadToken.created_at.desc()).first()
+        
+        if upload_token:
+            upload_token.used_at = None
+            upload_token.image_url = None
+            upload_token.analysis_summary = None
+            upload_token.troubleshooting_tips = None
+            upload_token.is_appliance_image = None
+            db.commit()
+            db.refresh(upload_token)
+            logger.info(f"Reset upload token for re-upload: {upload_token.token[:8]}...", 
+                       extra={"call_sid": call_sid})
+            return build_upload_url(upload_token.token)
+        return None
+    finally:
+        db.close()
+
+
 def get_upload_status_by_call_sid(call_sid: str) -> Optional[dict]:
     """
     Check if an image has been uploaded for a given call.

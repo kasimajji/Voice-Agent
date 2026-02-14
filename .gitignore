@@ -66,6 +66,10 @@ setup_local_mysql.sql
 setup_workbench.sql
 verify_setup.sh
 
+# Secrets / credentials
+.secrets/
+app/.secrets/
+
 # Temporary files
 *.tmp
 *.temp

@@ -251,10 +251,14 @@ def llm_interpret_troubleshooting_response(speech_text: str, troubleshooting_ste
             raw_result = re.sub(r'```[a-z]*\n?', '', raw_result)
             raw_result = raw_result.replace('```', '').strip()
         
-        # Ensure we have valid JSON
-        if not raw_result or not raw_result.startswith('{'):
-            logger.warning(f"Invalid JSON format: '{raw_result}', using fallback")
-            raise ValueError("Invalid JSON format")
+        # Extract JSON object even if LLM included extra text around it
+        json_match = re.search(r'\{[^{}]*\}', raw_result, re.DOTALL)
+        if json_match:
+            raw_result = json_match.group(0)
+        
+        if not raw_result or not raw_result.strip().startswith('{'):
+            logger.warning(f"No JSON found in troubleshoot response: '{raw_result[:200]}', using fallback")
+            raise ValueError("No JSON found")
         
         parsed = json.loads(raw_result)
         logger.debug(f"Interpreted '{speech_text}' as: {parsed}")
@@ -300,18 +304,22 @@ def llm_extract_name(speech_text: str) -> str | None:
         prompt = f"""Extract the person's name from this speech transcription.
 
 Rules:
-1. Return ONLY the first name (e.g., "John", "Sarah", "Mike")
+1. Return ONLY the first name (e.g., "John", "Kasi", "Shiny")
 2. If the input is noise, random words, or not a name, return "none"
 3. Common patterns: "My name is John", "I'm Sarah", "This is Mike", or just "John"
 4. Ignore filler words like "uh", "um", "whatever", "just", etc.
+5. Accept names from ALL cultures and languages — Indian, Chinese, Arabic, African, etc.
+6. A single word that could be a name IS a name. When in doubt, treat it as a name.
 
 Examples:
 - "My name is John Smith" -> John
 - "I'm Sarah" -> Sarah
-- "Mike" -> Mike
+- "Shiny" -> Shiny
+- "Kasi" -> Kasi
+- "Priya" -> Priya
+- "Hi Sam, my name is Wei" -> Wei
 - "Whatever" -> none
 - "Uh, just testing" -> none
-- "Background noise" -> none
 - "I'm good" -> none
 
 Transcription: {speech_text}
@@ -596,6 +604,11 @@ def _normalize_speech_for_email(speech_text: str) -> str:
     # Collapse spaced single digits: "1 2 3" -> "123"
     text = re.sub(r'(\d)\s+(?=\d)', r'\1', text)
     
+    # Collapse digits adjacent to letters with spaces: "majji 24" -> "majji24"
+    # This handles non-native speakers who pause between letter groups and numbers
+    text = re.sub(r'([a-z])\s+(\d)', r'\1\2', text)
+    text = re.sub(r'(\d)\s+([a-z])', r'\1\2', text)
+    
     # Remove any remaining punctuation between letters (cleanup pass)
     text = re.sub(r'([a-z])\s*[,;:!?]\s*(?=[a-z])', r'\1 ', text)
     
@@ -641,16 +654,27 @@ def llm_extract_email(speech_text: str) -> str:
     logger.debug(f"Email candidate after cleanup: '{email_candidate}'")
     
     # Step 3: Extract email using regex
+    # Always try the no-spaces version too, and prefer the one with the longer username
     match = _EMAIL_REGEX.search(email_candidate)
+    email_no_spaces = email_candidate.replace(' ', '')
+    match_no_spaces = _EMAIL_REGEX.search(email_no_spaces)
     
-    if not match:
-        email_no_spaces = email_candidate.replace(' ', '')
-        match = _EMAIL_REGEX.search(email_no_spaces)
-        if match:
-            logger.debug(f"Email found after removing spaces: '{email_no_spaces}'")
+    if match_no_spaces:
+        logger.debug(f"Email found after removing spaces: '{email_no_spaces}'")
     
-    if match:
-        email = match.group(0).lower()
+    # Pick the best match: prefer the one with the longer username (more complete)
+    best_match = None
+    if match and match_no_spaces:
+        user_orig = match.group(0).split('@')[0]
+        user_nospace = match_no_spaces.group(0).split('@')[0]
+        best_match = match_no_spaces if len(user_nospace) > len(user_orig) else match
+    elif match_no_spaces:
+        best_match = match_no_spaces
+    elif match:
+        best_match = match
+    
+    if best_match:
+        email = best_match.group(0).lower()
         has_valid_tld = any(email.endswith(tld) for tld in _VALID_TLDS)
         if has_valid_tld:
             logger.info(f"Email extracted: '{email}'")
@@ -663,11 +687,16 @@ def llm_extract_email(speech_text: str) -> str:
 The speech-to-text captured: "{speech_text}"
 
 Decode and construct the complete email address. Consider:
-- Letters may be spelled out: "k a s i" = "kasi"
+- Letters may be spelled out with pauses: "k a s i" = "kasi"
+- Periods between letters are STT artifacts, not real periods: "K. A. S. I." = "kasi"
 - "at" or "at the rate" = "@"
+- "dot" between name parts = "." (e.g. "kasi dot majji" = "kasi.majji")
 - "dot com" = ".com", "dot net" = ".net"
+- Numbers may be spoken: "two four" or "2 4" = "24"
+- The speaker may be a non-native English speaker, so letters may sound different
 - Common domains: gmail.com, yahoo.com, outlook.com, hotmail.com
 - If no domain mentioned, assume @gmail.com
+- Join ALL spelled letters and numbers into one continuous username before the @
 
 Return ONLY the complete email address, nothing else:"""
 

@@ -5,9 +5,9 @@ from unittest.mock import MagicMock
 
 
 def test_tts_voice_default():
-    """TTS_VOICE should default to Polly.Joanna-Neural."""
+    """TTS_VOICE should default to a Google WaveNet or Polly Neural voice."""
     from app.config import TTS_VOICE
-    assert "Neural" in TTS_VOICE or TTS_VOICE == os.getenv("TTS_VOICE", "Polly.Joanna-Neural")
+    assert "Wavenet" in TTS_VOICE or "Neural" in TTS_VOICE or TTS_VOICE == os.getenv("TTS_VOICE", "Google.en-US-Wavenet-F")
 
 
 def test_stt_speech_model():
