@@ -2,6 +2,9 @@ from sqlalchemy import func, select
 from .db import SessionLocal
 from .models import AvailabilitySlot, Appointment, TechnicianServiceArea, TechnicianSpecialty, Technician
 from datetime import datetime
+from .logging_config import get_logger
+
+logger = get_logger("scheduling")
 
 
 def find_available_slots(zip_code: str, appliance_type: str, time_preference: str = None, limit: int = 3):
@@ -67,7 +70,12 @@ def find_available_slots(zip_code: str, appliance_type: str, time_preference: st
                 })
                 if len(results) >= limit:
                     break
+        
+        logger.info(f"Found {len(results)} slots for ZIP={zip_code}, appliance={appliance_type}, pref={time_preference}")
         return results
+    except Exception as e:
+        logger.error(f"Error finding slots: {e}", exc_info=True)
+        return []
     finally:
         db.close()
 
@@ -94,8 +102,10 @@ def book_appointment(call_sid: str, customer_phone: str, zip_code: str, applianc
     try:
         slot = db.query(AvailabilitySlot).filter_by(id=chosen_slot_id).first()
         if not slot:
+            logger.error(f"Slot {chosen_slot_id} not found")
             raise ValueError(f"Slot {chosen_slot_id} not found")
         if slot.is_booked:
+            logger.warning(f"Slot {chosen_slot_id} is already booked")
             raise ValueError(f"Slot {chosen_slot_id} is already booked")
         
         slot.is_booked = True
@@ -125,7 +135,12 @@ def book_appointment(call_sid: str, customer_phone: str, zip_code: str, applianc
             "start_time": appt.start_time,
             "end_time": appt.end_time
         }
+        logger.info(f"Appointment booked: ID={appt.id}, tech={tech_name}, call={call_sid}")
         return appt_info
+    except Exception as e:
+        logger.error(f"Booking failed for slot {chosen_slot_id}: {e}", exc_info=True)
+        db.rollback()
+        raise
     finally:
         db.close()
 

@@ -33,7 +33,15 @@ def _get_initial_state() -> dict:
         "upload_token": None,
         "waiting_for_upload": False,
         "upload_poll_count": 0,
-        "image_analysis_spoken": False
+        "image_analysis_spoken": False,
+        # Autonomous flow fields
+        "understand_attempts": 0,
+        "appliance_attempts": 0,
+        "zip_attempts": 0,
+        "customer_name": None,
+        "troubleshooting_steps_text": None,
+        "analysis_spoken": False,
+        "upload_wait_attempts": 0,
     }
 
 
@@ -204,14 +212,15 @@ def update_state(call_id: str, new_state: dict) -> None:
 def infer_appliance_type(user_text: str) -> str | None:
     """Infers appliance type from user text using simple keyword matching."""
     text = user_text.lower()
+    # Check "dishwasher" BEFORE "washer" to avoid false match
+    if "dishwasher" in text:
+        return "dishwasher"
     if "washer" in text or "washing machine" in text:
         return "washer"
     if "dryer" in text:
         return "dryer"
     if "fridge" in text or "refrigerator" in text:
         return "refrigerator"
-    if "dishwasher" in text:
-        return "dishwasher"
     if "oven" in text or "stove" in text:
         return "oven"
     if "ac" in text or "air conditioner" in text or "hvac" in text:
@@ -270,12 +279,62 @@ def get_next_troubleshooting_prompt(state: dict) -> str | None:
     return prompt
 
 
+def get_troubleshooting_steps_summary(appliance_type: str) -> str:
+    """
+    Return ALL troubleshooting steps for an appliance as a concise summary.
+    Used in the autonomous flow where all steps are presented at once.
+    
+    Returns empty string if no steps are available for the appliance.
+    """
+    appliance = appliance_type.lower() if appliance_type else ""
+    steps = BASIC_TROUBLESHOOTING.get(appliance, [])
+    
+    if not steps:
+        return ""
+    
+    # Format as numbered list for speech
+    parts = []
+    for i, step in enumerate(steps, 1):
+        # Remove "Please " prefix for conciseness when presenting all at once
+        clean_step = step.replace("Please check", "Check").replace("Please ", "")
+        parts.append(f"Step {i}: {clean_step}")
+    
+    return " ".join(parts)
+
+
 def is_positive_response(user_text: str) -> bool:
-    """Returns True if user response indicates success/yes."""
+    """Returns True if user response indicates success/yes.
+    
+    Handles negations like "not working", "didn't help", "no it's not fixed".
+    """
     text = user_text.lower()
     words = text.split()
-    positive_words = {"yes", "yeah", "yep", "yup", "ok", "okay"}
-    positive_phrases = ["it worked", "fixed", "working", "helped", "that helped"]
+    
+    # Check for explicit negative responses first
+    negative_patterns = [
+        "not working", "isn't working", "isn't helping", "not helping",
+        "didn't work", "didn't help", "doesn't work", "doesn't help",
+        "still not", "still broken", "still having", "no luck",
+        "not fixed", "isn't fixed", "didn't fix", "doesn't fix",
+        "same problem", "same issue", "no change", "nothing changed",
+        "nope", "negative", "unfortunately"
+    ]
+    
+    # If any negative pattern is found, return False immediately
+    if any(pattern in text for pattern in negative_patterns):
+        return False
+    
+    # Check for "no" at the start or standalone
+    if text.strip().startswith("no") or text.strip() == "no":
+        # But allow "no problem" or "no worries" as neutral
+        if "no problem" not in text and "no worries" not in text:
+            return False
+    
+    # Now check for positive responses
+    positive_words = {"yes", "yeah", "yep", "yup", "ok", "okay", "sure", "absolutely"}
+    positive_phrases = ["it worked", "that worked", "fixed", "working now", 
+                        "helped", "that helped", "it's working", "all good",
+                        "problem solved", "issue resolved", "good now"]
     
     if any(word in positive_words for word in words):
         return True

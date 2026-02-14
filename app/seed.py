@@ -67,70 +67,89 @@ TECHNICIANS_DATA = [
 
 
 def seed_data():
-    """Seed database with 20 technicians, service areas, specialties, and availability slots."""
+    """Seed database with 20 technicians, service areas, specialties, and availability slots.
+    
+    Uses MySQL advisory lock to prevent duplicate inserts when multiple
+    Gunicorn workers start concurrently (fixes docker-compose up 4x write bug).
+    """
+    from sqlalchemy import text
+    
     db = SessionLocal()
     try:
-        if db.query(Technician).first():
-            logger.info("Data already exists, skipping seed.")
+        # Acquire a DB-level advisory lock to prevent concurrent seeding.
+        # GET_LOCK returns 1 if acquired, 0 if timed out, NULL on error.
+        result = db.execute(text("SELECT GET_LOCK('seed_data_lock', 10)")).scalar()
+        if result != 1:
+            logger.warning("Could not acquire seed lock, another worker is seeding.")
             return
-
-        technicians = []
-        for name, phone, email, _, _ in TECHNICIANS_DATA:
-            tech = Technician(name=name, phone=phone, email=email)
-            technicians.append(tech)
         
-        db.add_all(technicians)
-        db.commit()
-        
-        # Refresh to get IDs
-        for tech in technicians:
-            db.refresh(tech)
+        try:
+            if db.query(Technician).first():
+                logger.info("Data already exists, skipping seed.")
+                return
 
-        # Add service areas and specialties
-        service_areas = []
-        specialties = []
-        
-        for i, (_, _, _, zip_codes, appliance_types) in enumerate(TECHNICIANS_DATA):
-            tech_id = technicians[i].id
-            for zip_code in zip_codes:
-                service_areas.append(TechnicianServiceArea(technician_id=tech_id, zip_code=zip_code))
-            for appliance_type in appliance_types:
-                specialties.append(TechnicianSpecialty(technician_id=tech_id, appliance_type=appliance_type))
+            technicians = []
+            for name, phone, email, _, _ in TECHNICIANS_DATA:
+                tech = Technician(name=name, phone=phone, email=email)
+                technicians.append(tech)
+            
+            db.add_all(technicians)
+            db.commit()
+            
+            # Refresh to get IDs
+            for tech in technicians:
+                db.refresh(tech)
 
-        db.add_all(service_areas + specialties)
+            # Add service areas and specialties
+            service_areas = []
+            specialties = []
+            
+            for i, (_, _, _, zip_codes, appliance_types) in enumerate(TECHNICIANS_DATA):
+                tech_id = technicians[i].id
+                for zip_code in zip_codes:
+                    service_areas.append(TechnicianServiceArea(technician_id=tech_id, zip_code=zip_code))
+                for appliance_type in appliance_types:
+                    specialties.append(TechnicianSpecialty(technician_id=tech_id, appliance_type=appliance_type))
 
-        # Create availability slots for next 10 days (morning + afternoon per tech)
-        now = datetime.utcnow()
-        slots = []
-        for tech in technicians:
-            for day_offset in range(1, 11):  # Next 10 days
-                # Morning slot: 9 AM - 12 PM
-                morning_start = now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=day_offset)
-                morning_end = morning_start + timedelta(hours=3)
-                slots.append(AvailabilitySlot(
-                    technician_id=tech.id,
-                    start_time=morning_start,
-                    end_time=morning_end,
-                    is_booked=False
-                ))
-                # Afternoon slot: 1 PM - 4 PM
-                afternoon_start = now.replace(hour=13, minute=0, second=0, microsecond=0) + timedelta(days=day_offset)
-                afternoon_end = afternoon_start + timedelta(hours=3)
-                slots.append(AvailabilitySlot(
-                    technician_id=tech.id,
-                    start_time=afternoon_start,
-                    end_time=afternoon_end,
-                    is_booked=False
-                ))
+            db.add_all(service_areas + specialties)
 
-        db.add_all(slots)
-        db.commit()
-        
-        logger.info(f"Database seeded: {len(technicians)} technicians, "
-              f"{len(service_areas)} service areas, {len(specialties)} specialties, "
-              f"{len(slots)} availability slots.")
+            # Create availability slots for next 10 days (morning + afternoon per tech)
+            now = datetime.utcnow()
+            slots = []
+            for tech in technicians:
+                for day_offset in range(1, 11):  # Next 10 days
+                    # Morning slot: 9 AM - 12 PM
+                    morning_start = now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=day_offset)
+                    morning_end = morning_start + timedelta(hours=3)
+                    slots.append(AvailabilitySlot(
+                        technician_id=tech.id,
+                        start_time=morning_start,
+                        end_time=morning_end,
+                        is_booked=False
+                    ))
+                    # Afternoon slot: 1 PM - 4 PM
+                    afternoon_start = now.replace(hour=13, minute=0, second=0, microsecond=0) + timedelta(days=day_offset)
+                    afternoon_end = afternoon_start + timedelta(hours=3)
+                    slots.append(AvailabilitySlot(
+                        technician_id=tech.id,
+                        start_time=afternoon_start,
+                        end_time=afternoon_end,
+                        is_booked=False
+                    ))
+
+            db.add_all(slots)
+            db.commit()
+            
+            logger.info(f"Database seeded: {len(technicians)} technicians, "
+                  f"{len(service_areas)} service areas, {len(specialties)} specialties, "
+                  f"{len(slots)} availability slots.")
+        except Exception as e:
+            logger.error(f"Failed to seed database: {e}")
+            db.rollback()
+        finally:
+            # Always release the advisory lock
+            db.execute(text("SELECT RELEASE_LOCK('seed_data_lock')"))
     except Exception as e:
-        logger.error(f"Failed to seed database: {e}")
-        db.rollback()
+        logger.error(f"Failed to acquire seed lock: {e}")
     finally:
         db.close()

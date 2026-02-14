@@ -58,8 +58,8 @@ mysql_data/
 # Generated documentation (keep .md versions)
 *.docx
 
-# Test files
-test_*.py
+# Test files (keep tests/ directory, ignore ad-hoc test scripts in root)
+# test_*.py
 
 # Local setup scripts (not needed for Docker)
 setup_local_mysql.sql

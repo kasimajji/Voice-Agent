@@ -194,45 +194,36 @@ def llm_interpret_troubleshooting_response(speech_text: str, troubleshooting_ste
             return {"is_resolved": False, "confidence": "low", "interpretation": speech_text}
     
     try:
-        prompt = f"""You are helping interpret a customer's response during appliance troubleshooting.
-
-Troubleshooting step given: "{troubleshooting_step}"
-
-Customer's response: "{speech_text}"
-
-Analyze the response and determine:
-1. Is the issue RESOLVED (fixed/working) or PERSISTS (still broken/not working)?
-2. What did the customer actually mean?
-
-IMPORTANT: Look for context clues:
-- "I checked it, it's at max cooling" means they checked but issue PERSISTS (not cooling despite max setting)
-- "It's good" could mean either fixed OR already checked (use context)
-- "Still having the issue" clearly means PERSISTS
-- "That worked!" clearly means RESOLVED
-- "No change" means PERSISTS
-
-Respond in JSON format:
-{{
-  "is_resolved": true/false,
-  "confidence": "high/medium/low",
-  "interpretation": "brief explanation of what customer meant"
-}}
-
-Examples:
-
-Input: "No, still having an issue"
-Output: {{"is_resolved": false, "confidence": "high", "interpretation": "Issue persists"}}
-
-Input: "I checked the dial, it's at max cooling"
-Output: {{"is_resolved": false, "confidence": "high", "interpretation": "Customer confirmed setting is correct but issue persists"}}
-
-Input: "Yes, that fixed it!"
-Output: {{"is_resolved": true, "confidence": "high", "interpretation": "Issue is resolved"}}
-
-Input: "The door is good"
-Output: {{"is_resolved": false, "confidence": "medium", "interpretation": "Door seal is fine but issue persists"}}
-
-Now analyze:"""
+        prompt = (
+            "You are helping interpret a customer's response during appliance troubleshooting.\n\n"
+            f'Troubleshooting step given: "{troubleshooting_step}"\n\n'
+            f'Customer\'s response: "{speech_text}"\n\n'
+            "Analyze the response and determine:\n"
+            "1. Is the issue RESOLVED (fixed/working) or PERSISTS (still broken/not working)?\n"
+            "2. What did the customer actually mean?\n\n"
+            "IMPORTANT: Look for context clues:\n"
+            '- "I checked it, it\'s at max cooling" means they checked but issue PERSISTS (not cooling despite max setting)\n'
+            '- "It\'s good" could mean either fixed OR already checked (use context)\n'
+            '- "Still having the issue" clearly means PERSISTS\n'
+            '- "That worked!" clearly means RESOLVED\n'
+            '- "No change" means PERSISTS\n\n'
+            "Respond in JSON format:\n"
+            '{\n'
+            '  "is_resolved": true/false,\n'
+            '  "confidence": "high/medium/low",\n'
+            '  "interpretation": "brief explanation of what customer meant"\n'
+            '}\n\n'
+            "Examples:\n\n"
+            'Input: "No, still having an issue"\n'
+            'Output: {"is_resolved": false, "confidence": "high", "interpretation": "Issue persists"}\n\n'
+            'Input: "I checked the dial, it\'s at max cooling"\n'
+            'Output: {"is_resolved": false, "confidence": "high", "interpretation": "Customer confirmed setting is correct but issue persists"}\n\n'
+            'Input: "Yes, that fixed it!"\n'
+            'Output: {"is_resolved": true, "confidence": "high", "interpretation": "Issue is resolved"}\n\n'
+            'Input: "The door is good"\n'
+            'Output: {"is_resolved": false, "confidence": "medium", "interpretation": "Door seal is fine but issue persists"}\n\n'
+            "Now analyze:"
+        )
 
         result = model.generate_content(
             prompt,
@@ -723,6 +714,193 @@ Return ONLY the complete email address, nothing else:"""
         email = f"{username}@gmail.com"
         logger.info(f"Email constructed with default domain: '{email}'")
         return email
+
+
+def llm_analyze_customer_intent(speech_text: str) -> dict:
+    """
+    Analyze the customer's open-ended response to understand their intent.
+    This powers the autonomous flow — the customer can say anything and the
+    agent adapts: describe a problem, ask to schedule, mention an appliance, etc.
+    
+    Returns:
+        dict with:
+        - intent: 'describe_problem' | 'schedule_technician' | 'general_inquiry' | 'unclear'
+        - appliance_type: str or None (washer, dryer, refrigerator, etc.)
+        - symptoms: str or None (problem description if provided)
+        - wants_scheduling: bool (True if customer explicitly wants to schedule)
+        - has_full_description: bool (True if customer gave enough detail to skip symptom asking)
+    """
+    fallback = {
+        "intent": "unclear",
+        "appliance_type": None,
+        "symptoms": None,
+        "wants_scheduling": False,
+        "has_full_description": False
+    }
+    
+    if not speech_text or not speech_text.strip():
+        return fallback
+    
+    # Quick keyword check for scheduling intent
+    text_lower = speech_text.lower()
+    scheduling_keywords = ["schedule", "technician", "appointment", "book", "visit", "come out", "send someone"]
+    wants_scheduling = any(kw in text_lower for kw in scheduling_keywords)
+    
+    if not model:
+        # Fallback: keyword-based analysis
+        # Check compound words first to avoid substring false matches
+        # e.g. "dishwasher" contains "washer", "air conditioner" contains "air"
+        appliance = None
+        if "dishwasher" in text_lower:
+            appliance = "dishwasher"
+        elif "air conditioner" in text_lower or "heat pump" in text_lower:
+            appliance = "hvac"
+        else:
+            for kw in APPLIANCE_KEYWORDS:
+                if kw in text_lower:
+                    if kw in ("washer", "washing"):
+                        appliance = "washer"
+                    elif kw in ("dryer", "drying"):
+                        appliance = "dryer"
+                    elif kw in ("fridge", "refrigerator", "freezer"):
+                        appliance = "refrigerator"
+                    elif kw in ("oven", "stove", "range", "cooktop"):
+                        appliance = "oven"
+                    elif kw in ("hvac", "heating", "cooling", "ac", "furnace"):
+                        appliance = "hvac"
+                    break
+        
+        has_detail = len(speech_text.split()) > 8
+        return {
+            "intent": "schedule_technician" if wants_scheduling else ("describe_problem" if appliance else "unclear"),
+            "appliance_type": appliance,
+            "symptoms": speech_text if has_detail else None,
+            "wants_scheduling": wants_scheduling,
+            "has_full_description": has_detail and appliance is not None
+        }
+    
+    try:
+        prompt = (
+            "You are a customer service AI for a home appliance repair company.\n"
+            "Analyze the customer's message and extract their intent.\n\n"
+            f'Customer said: "{speech_text}"\n\n'
+            "Determine:\n"
+            '1. intent: What does the customer want?\n'
+            '   - "describe_problem" if they\'re describing an appliance issue\n'
+            '   - "schedule_technician" if they explicitly want to schedule/book a technician\n'
+            '   - "general_inquiry" if asking a question\n'
+            '   - "unclear" if you can\'t determine\n'
+            "2. appliance_type: Which appliance? One of: washer, dryer, refrigerator, dishwasher, oven, hvac, or null\n"
+            "3. symptoms: A brief summary of the problem they described, or null if none\n"
+            "4. wants_scheduling: true if they mentioned wanting to schedule/book a technician\n"
+            "5. has_full_description: true if they gave enough detail about the problem that we don't need to ask more\n\n"
+            "Respond in JSON only:\n"
+            '{\n'
+            '  "intent": "...",\n'
+            '  "appliance_type": "..." or null,\n'
+            '  "symptoms": "..." or null,\n'
+            '  "wants_scheduling": true/false,\n'
+            '  "has_full_description": true/false\n'
+            '}'
+        )
+
+        raw_result = ""
+        result = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.0, "max_output_tokens": 256}
+        )
+        try:
+            raw_result = result.text.strip()
+        except (ValueError, AttributeError):
+            # Log why the response failed
+            if hasattr(result, 'candidates') and result.candidates:
+                candidate = result.candidates[0]
+                logger.warning(f"Intent LLM candidate finish_reason: {getattr(candidate, 'finish_reason', 'unknown')}")
+                if hasattr(candidate, 'safety_ratings'):
+                    logger.warning(f"Intent LLM safety_ratings: {candidate.safety_ratings}")
+                try:
+                    raw_result = candidate.content.parts[0].text.strip()
+                except (AttributeError, IndexError) as inner_e:
+                    logger.error(f"Cannot extract intent from candidates: {inner_e}")
+                    pass  # fall through to keyword fallback
+            elif hasattr(result, 'prompt_feedback'):
+                logger.warning(f"Intent LLM prompt_feedback: {result.prompt_feedback}")
+        
+        logger.debug(f"Intent analysis raw LLM response: '{raw_result[:500]}'")
+        
+        if not raw_result:
+            raise ValueError("Empty LLM response")
+        
+        # Clean JSON — strip markdown fences
+        if '```json' in raw_result:
+            raw_result = re.sub(r'```json\n?', '', raw_result)
+            raw_result = raw_result.replace('```', '').strip()
+        elif '```' in raw_result:
+            raw_result = re.sub(r'```[a-z]*\n?', '', raw_result)
+            raw_result = raw_result.replace('```', '').strip()
+        
+        # Try to extract JSON object if there's extra text around it
+        json_match = re.search(r'\{[^{}]*\}', raw_result, re.DOTALL)
+        if json_match:
+            raw_result = json_match.group(0)
+        
+        parsed = json.loads(raw_result)
+        
+        # Validate appliance_type
+        appliance = parsed.get("appliance_type")
+        if appliance and appliance not in VALID_APPLIANCES:
+            appliance = None
+        if appliance == "other":
+            appliance = None
+        
+        result_dict = {
+            "intent": parsed.get("intent", "unclear"),
+            "appliance_type": appliance,
+            "symptoms": parsed.get("symptoms"),
+            "wants_scheduling": bool(parsed.get("wants_scheduling", False)),
+            "has_full_description": bool(parsed.get("has_full_description", False))
+        }
+        logger.debug(f"Intent analysis parsed: '{speech_text[:60]}' -> {result_dict}")
+        return result_dict
+        
+    except Exception as e:
+        logger.error(f"Intent analysis failed: {e}")
+        logger.error(f"Intent analysis raw text was: '{raw_result[:300] if raw_result else 'EMPTY'}'")
+        
+        # Robust keyword fallback when LLM JSON parsing fails
+        text_lower = speech_text.lower()
+        kw_appliance = None
+        if "dishwasher" in text_lower:
+            kw_appliance = "dishwasher"
+        elif "air conditioner" in text_lower:
+            kw_appliance = "hvac"
+        else:
+            for kw in APPLIANCE_KEYWORDS:
+                if kw in text_lower:
+                    if kw in ("washer", "washing"):
+                        kw_appliance = "washer"
+                    elif kw in ("dryer", "drying"):
+                        kw_appliance = "dryer"
+                    elif kw in ("fridge", "refrigerator", "freezer"):
+                        kw_appliance = "refrigerator"
+                    elif kw in ("oven", "stove", "range", "cooktop"):
+                        kw_appliance = "oven"
+                    elif kw in ("hvac", "heating", "cooling", "ac", "furnace"):
+                        kw_appliance = "hvac"
+                    break
+        
+        kw_scheduling = any(kw in text_lower for kw in ["schedule", "technician", "appointment", "book", "visit", "come out", "send someone"])
+        kw_has_detail = len(speech_text.split()) > 8
+        
+        kw_result = {
+            "intent": "schedule_technician" if kw_scheduling else ("describe_problem" if kw_appliance else "unclear"),
+            "appliance_type": kw_appliance,
+            "symptoms": speech_text if kw_has_detail else None,
+            "wants_scheduling": kw_scheduling,
+            "has_full_description": kw_has_detail and kw_appliance is not None
+        }
+        logger.info(f"Intent keyword fallback: '{speech_text[:60]}' -> {kw_result}")
+        return kw_result
 
 
 def llm_extract_symptoms(user_text: str) -> dict:

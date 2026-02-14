@@ -38,16 +38,22 @@ def create_engine_with_retry(database_url: str, max_retries: int = 5, retry_dela
     """
     Create database engine with retry logic for MySQL readiness.
     This is crucial for Docker Compose where the app may start before MySQL is ready.
+    Supports SQLite for testing (no connect_args needed).
     """
-    connect_args = {
-        "connect_timeout": 10,
-        "charset": "utf8mb4"
-    }
+    is_sqlite = database_url.startswith("sqlite")
+    
+    if is_sqlite:
+        connect_args = {}
+    else:
+        connect_args = {
+            "connect_timeout": 10,
+            "charset": "utf8mb4"
+        }
     
     engine = create_engine(
         database_url,
         connect_args=connect_args,
-        pool_pre_ping=True,  # Verify connections before using
+        pool_pre_ping=not is_sqlite,  # Verify connections before using (not needed for SQLite)
         pool_recycle=3600,   # Recycle connections after 1 hour
         echo=False
     )
