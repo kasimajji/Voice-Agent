@@ -774,14 +774,30 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
     elif current_step == "ask_symptoms":
         state["symptoms"] = speech_result
 
-        # Use LLM to classify what the customer said
+        # Use LLM to classify what the customer said — including schedule/callback redirects
         symptom_intent = llm_classify_user_intent(
             speech_result,
-            choices=["describe_problem", "unsure", "callback"],
-            context="Agent asked the customer to describe what's wrong with their appliance."
+            choices=["describe_problem", "unsure", "schedule", "callback"],
+            context="Agent asked the customer to describe what's wrong with their appliance. "
+                    "Customer may describe the problem, say they're unsure, ask to schedule a technician, or want to call back."
         )
         intent_choice = symptom_intent.get("choice", "unclear")
         intent_conf = symptom_intent.get("confidence", 0.0)
+
+        if intent_choice == "schedule" and intent_conf >= 0.6:
+            state["step"] = "collect_zip"
+            if not state.get("symptom_summary"):
+                appliance = state.get('appliance_type', 'appliance')
+                state["symptom_summary"] = f"Your {appliance} is not working properly"
+            update_state(call_sid, state)
+            
+            gather = _build_gather(response, continue_url, timeout=8, speech_timeout="3")
+            gather.append(create_ssml_say(
+                f"Absolutely{name_phrase}! Let's get a technician scheduled. "
+                "What is your ZIP code?"
+            ))
+            response.redirect(continue_url)
+            return Response(content=str(response), media_type="application/xml")
 
         if intent_choice == "callback" and intent_conf >= 0.6:
             state["step"] = "done"
@@ -1085,6 +1101,39 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
     # =========================================================================
     
     elif current_step == "collect_email":
+        # Cross-cutting: detect if customer wants to change course instead of giving email
+        redirect_intent = llm_classify_user_intent(
+            speech_result,
+            choices=["email", "schedule", "callback"],
+            context="Agent asked for the customer's email address to send a photo upload link. "
+                    "Did the customer provide an email, or do they want to schedule a technician or call back instead?"
+        )
+        redirect_choice = redirect_intent.get("choice", "email")
+        redirect_conf = redirect_intent.get("confidence", 0.0)
+        
+        if redirect_choice == "schedule" and redirect_conf >= 0.6:
+            state["step"] = "collect_zip"
+            update_state(call_sid, state)
+            gather = _build_gather(response, continue_url, timeout=8, speech_timeout="3")
+            gather.append(create_ssml_say(
+                f"Sure{name_phrase}! Let's schedule a technician instead. "
+                "What is your ZIP code?"
+            ))
+            response.redirect(continue_url)
+            return Response(content=str(response), media_type="application/xml")
+        
+        if redirect_choice == "callback" and redirect_conf >= 0.6:
+            state["step"] = "done"
+            update_state(call_sid, state)
+            goodbye_text = (
+                f"No problem{name_phrase}. You can call us back anytime when you're ready. "
+                "Thank you for calling Sears Home Services. Goodbye."
+            )
+            say_obj = say_with_logging(goodbye_text, call_sid, "collect_email")
+            response.append(say_obj)
+            response.hangup()
+            return Response(content=str(response), media_type="application/xml")
+        
         email = extract_email_from_speech(speech_result, call_sid)
         
         state["pending_email"] = email
@@ -1165,38 +1214,73 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 response.redirect(continue_url)
         
         elif intent == "no" or intent == "correction":
-            state["email_confirm_attempts"] = state.get("email_confirm_attempts", 0) + 1
             state["pending_email"] = None
             
-            logger.debug(f"Email rejected, attempt {state['email_confirm_attempts']}", extra={"call_sid": call_sid, "step": "confirm_email"})
+            # Check if customer wants to change course (schedule/callback) instead of re-trying email
+            redirect_intent = llm_classify_user_intent(
+                speech_result,
+                choices=["retry_email", "schedule", "callback"],
+                context="Customer said NO to email confirmation. Are they just correcting the email "
+                        "(retry_email), or do they want to schedule a technician or call back instead?"
+            )
+            redirect_choice = redirect_intent.get("choice", "retry_email")
+            redirect_conf = redirect_intent.get("confidence", 0.0)
             
-            if state["email_confirm_attempts"] <= 2:
-                state["step"] = "collect_email"
-                update_state(call_sid, state)
-                
-                email_hints = ("gmail.com, yahoo.com, outlook.com, hotmail.com, icloud.com, "
-                              "at gmail dot com, dot com, dot net, at the rate, "
-                              "zero, one, two, three, four, five, six, seven, eight, nine")
-                gather = _build_gather(response, continue_url, timeout=10, speech_timeout="4",
-                                       hints=email_hints, language="en-US")
-                gather.append(create_ssml_say(
-                    "No problem, let's try again. "
-                    "Please spell your email slowly, letter by letter. "
-                    "Say dot for periods and at for the at symbol."
-                ))
-                response.redirect(continue_url)
-            else:
-                logger.warning("Email confirmation failed 3 times, falling back to scheduling", extra={"call_sid": call_sid, "step": "confirm_email"})
+            logger.debug(f"Email reject redirect: {redirect_intent}", extra={"call_sid": call_sid, "step": "confirm_email"})
+            
+            if redirect_choice == "schedule" and redirect_conf >= 0.5:
                 state["step"] = "collect_zip"
                 update_state(call_sid, state)
-                
-                gather = _build_gather(response, continue_url, timeout=5, speech_timeout="3", language="en-US")
+                gather = _build_gather(response, continue_url, timeout=8, speech_timeout="3")
                 gather.append(create_ssml_say(
-                    "I'm having trouble with the email. "
-                    "Let me help you schedule a technician instead. "
+                    f"Sure{name_phrase}! Let's schedule a technician instead. "
                     "What is your ZIP code?"
                 ))
                 response.redirect(continue_url)
+            
+            elif redirect_choice == "callback" and redirect_conf >= 0.5:
+                state["step"] = "done"
+                update_state(call_sid, state)
+                goodbye_text = (
+                    f"No problem{name_phrase}. You can call us back anytime when you're ready. "
+                    "Thank you for calling Sears Home Services. Goodbye."
+                )
+                say_obj = say_with_logging(goodbye_text, call_sid, "confirm_email")
+                response.append(say_obj)
+                response.hangup()
+            
+            else:
+                # Customer just wants to correct the email — retry
+                state["email_confirm_attempts"] = state.get("email_confirm_attempts", 0) + 1
+                logger.debug(f"Email rejected, attempt {state['email_confirm_attempts']}", extra={"call_sid": call_sid, "step": "confirm_email"})
+                
+                if state["email_confirm_attempts"] <= 2:
+                    state["step"] = "collect_email"
+                    update_state(call_sid, state)
+                    
+                    email_hints = ("gmail.com, yahoo.com, outlook.com, hotmail.com, icloud.com, "
+                                  "at gmail dot com, dot com, dot net, at the rate, "
+                                  "zero, one, two, three, four, five, six, seven, eight, nine")
+                    gather = _build_gather(response, continue_url, timeout=10, speech_timeout="4",
+                                           hints=email_hints, language="en-US")
+                    gather.append(create_ssml_say(
+                        "No problem, let's try again. "
+                        "Please spell your email slowly, letter by letter. "
+                        "Say dot for periods and at for the at symbol."
+                    ))
+                    response.redirect(continue_url)
+                else:
+                    logger.warning("Email confirmation failed 3 times, falling back to scheduling", extra={"call_sid": call_sid, "step": "confirm_email"})
+                    state["step"] = "collect_zip"
+                    update_state(call_sid, state)
+                    
+                    gather = _build_gather(response, continue_url, timeout=5, speech_timeout="3", language="en-US")
+                    gather.append(create_ssml_say(
+                        "I'm having trouble with the email. "
+                        "Let me help you schedule a technician instead. "
+                        "What is your ZIP code?"
+                    ))
+                    response.redirect(continue_url)
         
         else:
             # Still unclear — ask again

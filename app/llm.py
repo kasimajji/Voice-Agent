@@ -862,13 +862,22 @@ def llm_analyze_customer_intent(speech_text: str) -> dict:
                         appliance = "hvac"
                     break
         
-        has_detail = len(speech_text.split()) > 8
+        # Check if customer described a symptom (not just named an appliance)
+        symptom_keywords = [
+            "not cooling", "not working", "won't start", "leaking", "broken",
+            "noise", "loud", "error", "won't turn", "not heating", "not spinning",
+            "not draining", "won't drain", "smells", "smoking", "sparking",
+            "vibrating", "shaking", "flooding", "overflowing", "beeping",
+            "flashing", "frozen", "ice", "warm", "hot", "cold",
+        ]
+        has_symptom = any(kw in text_lower for kw in symptom_keywords)
+        has_full = appliance is not None and has_symptom
         return {
             "intent": "schedule_technician" if wants_scheduling else ("describe_problem" if appliance else "unclear"),
             "appliance_type": appliance,
-            "symptoms": speech_text if has_detail else None,
+            "symptoms": speech_text if has_symptom else None,
             "wants_scheduling": wants_scheduling,
-            "has_full_description": has_detail and appliance is not None
+            "has_full_description": has_full
         }
     
     try:
@@ -885,7 +894,17 @@ def llm_analyze_customer_intent(speech_text: str) -> dict:
             "2. appliance_type: Which appliance? One of: washer, dryer, refrigerator, dishwasher, oven, hvac, or null\n"
             "3. symptoms: A brief summary of the problem they described, or null if none\n"
             "4. wants_scheduling: true if they mentioned wanting to schedule/book a technician\n"
-            "5. has_full_description: true if they gave enough detail about the problem that we don't need to ask more\n\n"
+            "5. has_full_description: true if the customer mentioned BOTH an appliance AND any problem/symptom.\n"
+            "   IMPORTANT: Even a short description counts as full if it has an appliance + a symptom.\n"
+            "   Examples of has_full_description = TRUE:\n"
+            '     - "My refrigerator is not cooling" (appliance=refrigerator, symptom=not cooling)\n'
+            '     - "Washer is leaking" (appliance=washer, symptom=leaking)\n'
+            '     - "Dryer won\'t start" (appliance=dryer, symptom=won\'t start)\n'
+            '     - "Dishwasher making loud noise" (appliance=dishwasher, symptom=loud noise)\n'
+            "   Examples of has_full_description = FALSE:\n"
+            '     - "I have a problem with my fridge" (appliance=refrigerator, but NO specific symptom)\n'
+            '     - "Something is wrong" (no appliance, no symptom)\n'
+            '     - "My washer" (appliance only, no symptom)\n\n'
             "Respond in JSON only:\n"
             '{\n'
             '  "intent": "...",\n'
