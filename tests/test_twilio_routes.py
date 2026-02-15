@@ -59,27 +59,29 @@ class TestSpellEmailSlow:
         assert self.spell(None) == ""
 
 
-class TestIsYesNoResponse:
+class TestLlmClassifyYesNo:
+    """Test the LLM-powered yes/no classifier (keyword fallback when model is None)."""
     def setup_method(self):
-        from app.twilio_routes import is_yes_response, is_no_response
-        self.is_yes = is_yes_response
-        self.is_no = is_no_response
+        from app.llm import llm_classify_yes_no
+        self.classify = llm_classify_yes_no
 
     @pytest.mark.parametrize("text", ["yes", "yeah", "yep", "correct", "ok", "okay", "that's right"])
     def test_yes_responses(self, text):
-        assert self.is_yes(text) is True
+        result = self.classify(text)
+        assert result["intent"] == "yes"
 
     @pytest.mark.parametrize("text", ["no", "nope", "wrong", "incorrect", "try again"])
     def test_no_responses(self, text):
-        assert self.is_no(text) is True
+        result = self.classify(text)
+        assert result["intent"] == "no"
 
     def test_yes_not_no(self):
-        assert self.is_yes("yes") is True
-        assert self.is_no("yes") is False
+        assert self.classify("yes")["intent"] == "yes"
+        assert self.classify("yes")["intent"] != "no"
 
     def test_no_not_yes(self):
-        assert self.is_no("no") is True
-        assert self.is_yes("no") is False
+        assert self.classify("no")["intent"] == "no"
+        assert self.classify("no")["intent"] != "yes"
 
 
 class TestCreateSsmlSay:
@@ -389,10 +391,11 @@ class TestVoiceContinueConfirmZip:
         assert call_args[0][1]["step"] == "confirm_zip"
         assert call_args[0][1]["zip_code"] == "60601"
 
+    @patch("app.twilio_routes.llm_classify_yes_no")
     @patch("app.twilio_routes.get_state")
     @patch("app.twilio_routes.update_state")
     @patch("app.twilio_routes.log_conversation")
-    def test_zip_confirmed_moves_to_time_pref(self, mock_log, mock_update, mock_get):
+    def test_zip_confirmed_moves_to_time_pref(self, mock_log, mock_update, mock_get, mock_yn):
         from app.main import app
         mock_get.return_value = {
             "step": "confirm_zip",
@@ -400,6 +403,7 @@ class TestVoiceContinueConfirmZip:
             "no_input_attempts": 0,
             "customer_name": "John",
         }
+        mock_yn.return_value = {"intent": "yes", "correction_value": None}
 
         client = TestClient(app)
         resp = client.post(
@@ -413,10 +417,11 @@ class TestVoiceContinueConfirmZip:
         call_args = mock_update.call_args
         assert call_args[0][1]["step"] == "collect_time_pref"
 
+    @patch("app.twilio_routes.llm_classify_yes_no")
     @patch("app.twilio_routes.get_state")
     @patch("app.twilio_routes.update_state")
     @patch("app.twilio_routes.log_conversation")
-    def test_zip_rejected_asks_again(self, mock_log, mock_update, mock_get):
+    def test_zip_rejected_asks_again(self, mock_log, mock_update, mock_get, mock_yn):
         from app.main import app
         mock_get.return_value = {
             "step": "confirm_zip",
@@ -424,6 +429,7 @@ class TestVoiceContinueConfirmZip:
             "no_input_attempts": 0,
             "customer_name": "John",
         }
+        mock_yn.return_value = {"intent": "no", "correction_value": None}
 
         client = TestClient(app)
         resp = client.post(

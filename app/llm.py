@@ -590,15 +590,53 @@ def _normalize_speech_for_email(speech_text: str) -> str:
     # Normalize "dot" in middle of email (actual period): "john dot smith" -> "john.smith"
     text = re.sub(r'\s+dot\s+', '.', text)
     
-    # Convert number words to digits
+    # Convert number words to digits — but ONLY when they appear in a numeric
+    # context (e.g. "two four" in "majji two four").  In an email context,
+    # sequences like "nine nine nine" are almost always the letter "n" repeated
+    # (STT hears "n" as "nine").  Detect this: if 3+ consecutive number words
+    # appear and there is NO @ yet AND we're in a letter-spelling context,
+    # treat them as letters instead.
     words = text.split()
     converted = []
-    for word in words:
-        clean_word = re.sub(r'[.,;:!?]', '', word)
+    i = 0
+    while i < len(words):
+        clean_word = re.sub(r'[.,;:!?]', '', words[i])
         if clean_word in _NUMBER_WORDS:
-            converted.append(_NUMBER_WORDS[clean_word])
+            # Look ahead: count consecutive number words
+            run_start = i
+            run = []
+            while i < len(words):
+                cw = re.sub(r'[.,;:!?]', '', words[i])
+                if cw in _NUMBER_WORDS:
+                    run.append((words[i], cw))
+                    i += 1
+                else:
+                    break
+            # Heuristic: if 3+ consecutive "nine" (or same number word),
+            # it's likely the letter being spelled, not actual digits.
+            # "nine nine nine" → "nnn" not "999"
+            # Map: nine→n, eight→a (ate), five→f, four→f, six→s, two→t
+            _DIGIT_TO_LETTER_GUESS = {
+                'nine': 'n', 'niner': 'n',
+                'eight': 'a', 'ate': 'a',
+                'five': 'f',
+                'four': 'f', 'for': 'f', 'fore': 'f',
+                'six': 's', 'sicks': 's',
+                'two': 't', 'to': 't', 'too': 't',
+                'one': 'w', 'won': 'w',
+            }
+            unique_words = set(cw for _, cw in run)
+            if len(run) >= 3 and len(unique_words) == 1 and list(unique_words)[0] in _DIGIT_TO_LETTER_GUESS:
+                # All same number word repeated 3+ times → likely a letter
+                letter = _DIGIT_TO_LETTER_GUESS[list(unique_words)[0]]
+                converted.append(letter * len(run))
+            else:
+                # Normal digit conversion
+                for orig, cw in run:
+                    converted.append(_NUMBER_WORDS.get(cw, orig))
         else:
-            converted.append(word)
+            converted.append(words[i])
+            i += 1
     text = ' '.join(converted)
     
     # Collapse spaced single digits: "1 2 3" -> "123"
@@ -938,36 +976,37 @@ def llm_plan_next_step(user_text: str, state: dict) -> str:
 
     Returns the next executable step from a strict allowlist. This keeps the
     agent autonomous while preventing off-policy behavior.
-    """
-    allowed_steps = {
-        "greet_ask_name",
-        "understand_need",
-        "ask_symptoms",
-        "offer_troubleshoot_or_schedule",
-        "troubleshoot_all",
-        "confirm_resolution",
-        "offer_image_upload",
-        "collect_email",
-        "confirm_email",
-        "waiting_for_upload",
-        "speak_analysis",
-        "after_analysis",
-        "collect_zip",
-        "confirm_zip",
-        "collect_time_pref",
-        "choose_slot",
-        "done",
-    }
 
-    # Deterministic guards for in-flight operations.
+    Cross-cutting exit detection is now LLM-powered instead of keyword-based.
+    """
     current_step = state.get("step") or "greet_ask_name"
     text = (user_text or "").strip()
-    text_lower = text.lower()
 
-    # Cross-cutting exit: "call back later" always routes to done
-    if any(k in text_lower for k in ["not now", "call back", "later", "goodbye", "another time"]):
-        return "done"
+    # Cross-cutting exit: use LLM to detect "call back later" / goodbye intent
+    # Only check if there's actual speech and we're not already at a terminal step
+    if text and current_step != "done" and model:
+        try:
+            prompt = f"""Is the caller trying to end the call or say goodbye?
 
+Caller said: "{text}"
+
+Rules:
+- "yes" if they want to end the call (goodbye, call back later, not now, another time, hang up, I'm done)
+- "no" if they are answering a question or continuing the conversation
+- When in doubt, say "no"
+
+Return ONLY "yes" or "no":"""
+            result = model.generate_content(
+                prompt,
+                generation_config={"temperature": 0.0, "max_output_tokens": 5},
+            )
+            answer = result.text.strip().lower()
+            if answer.startswith("yes"):
+                return "done"
+        except Exception as e:
+            logger.debug(f"Planner exit-detection failed: {e}")
+
+    # Deterministic state guards for in-flight operations
     if state.get("appointment_booked") or state.get("resolved"):
         return "done"
     if state.get("pending_email"):
@@ -981,6 +1020,392 @@ def llm_plan_next_step(user_text: str, state: dict) -> str:
     # analysis.  The planner must NOT bypass them — just return the current
     # step so each handler's own logic runs.
     return current_step
+
+
+def llm_generate_troubleshooting_steps(appliance_type: str, symptom_summary: str = "") -> str:
+    """
+    Use LLM to generate appliance-specific troubleshooting steps instead of
+    relying on a static lookup table.  Returns a concise numbered list suitable
+    for reading aloud over the phone (3 steps max).
+    """
+    if not model:
+        return ""
+
+    symptom_ctx = f' The reported issue is: "{symptom_summary}".' if symptom_summary else ""
+    try:
+        prompt = (
+            f"You are a home appliance repair expert. Generate exactly 3 quick "
+            f"troubleshooting steps a customer can try RIGHT NOW for their "
+            f"{appliance_type}.{symptom_ctx}\n\n"
+            "Rules:\n"
+            "- Each step must be a single clear sentence the customer can act on immediately\n"
+            "- Use simple language suitable for reading aloud on a phone call\n"
+            "- Focus on the most common fixes for this appliance and symptom\n"
+            "- Do NOT include safety warnings or disclaimers\n"
+            "- Format: Step 1: ... Step 2: ... Step 3: ...\n\n"
+            "Steps:"
+        )
+        result = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.2, "max_output_tokens": 200},
+        )
+        raw = result.text.strip()
+        # Ensure it starts with "Step 1"
+        if "Step 1" not in raw:
+            return ""
+        return raw
+    except Exception as e:
+        logger.error(f"Troubleshooting generation failed: {e}")
+        return ""
+
+
+def llm_classify_yes_no(user_text: str, context: str = "") -> dict:
+    """
+    Universal LLM-powered yes/no/correction classifier.
+    Replaces ALL keyword-based is_yes_response / is_no_response checks.
+
+    Returns:
+        {
+          "intent": "yes" | "no" | "correction" | "unclear",
+          "correction_value": str | None
+        }
+    """
+    fallback = {"intent": "unclear", "correction_value": None}
+    if not user_text or not user_text.strip():
+        return fallback
+
+    # Lightweight keyword fallback when LLM model is unavailable (tests, no API key)
+    if not model:
+        text_lower = user_text.lower().strip()
+        # Check negatives FIRST — "incorrect" contains "correct" so order matters
+        _no = {"no", "nope", "wrong", "incorrect", "negative", "not right",
+               "that's wrong", "that is wrong", "try again"}
+        _yes = {"yes", "yeah", "yep", "yup", "correct", "right", "sure", "ok", "okay",
+                "affirmative", "absolutely", "that's right", "that's correct", "that is right"}
+        if any(w in text_lower for w in _no):
+            return {"intent": "no", "correction_value": None}
+        if any(w in text_lower for w in _yes):
+            return {"intent": "yes", "correction_value": None}
+        return fallback
+
+    try:
+        prompt = f"""Classify the caller's response as yes, no, correction, or unclear.
+
+Context: {context if context else "Agent asked a yes/no confirmation question."}
+Caller said: "{user_text}"
+
+Rules:
+- "yes" = any affirmative (yes, yeah, yep, correct, that's right, sure, ok, absolutely, uh-huh, mm-hmm)
+- "no" = any negative (no, nope, wrong, incorrect, that's wrong, negative, not right)
+- "correction" = caller provides a corrected value (e.g. "no it's 60604", "actually it's john@gmail.com")
+  Extract the corrected value into correction_value.
+- "unclear" = cannot determine intent
+
+Return ONLY valid JSON:
+{{"intent": "...", "correction_value": null}}"""
+
+        result = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.0, "max_output_tokens": 64},
+        )
+        raw = result.text.strip()
+        if "```" in raw:
+            raw = re.sub(r"```[a-z]*\n?", "", raw).replace("```", "").strip()
+        json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if json_match:
+            raw = json_match.group(0)
+        data = json.loads(raw)
+        intent = data.get("intent", "unclear")
+        if intent not in ("yes", "no", "correction", "unclear"):
+            intent = "unclear"
+        logger.debug(f"LLM yes/no: '{user_text}' -> {intent}")
+        return {"intent": intent, "correction_value": data.get("correction_value")}
+    except Exception as e:
+        logger.warning(f"LLM yes/no failed: {e}")
+        return fallback
+
+
+def llm_classify_user_intent(user_text: str, choices: list[str], context: str = "") -> dict:
+    """
+    Universal LLM-powered multi-choice intent classifier.
+    Replaces ALL keyword-list matching for routing decisions.
+
+    Args:
+        user_text: What the caller said
+        choices: Valid choice labels, e.g. ["troubleshoot", "schedule", "callback", "photo"]
+        context: What the agent just asked
+
+    Returns:
+        {"choice": one of choices or "unclear", "confidence": float 0-1}
+    """
+    fallback = {"choice": "unclear", "confidence": 0.0}
+    if not user_text or not user_text.strip():
+        return fallback
+
+    # Lightweight keyword fallback when LLM model is unavailable (tests, no API key)
+    if not model:
+        text_lower = user_text.lower()
+        # Generic keyword hints per common choice labels
+        _choice_hints = {
+            "troubleshoot": ["troubleshoot", "try", "steps", "fix myself", "diagnose"],
+            "schedule": ["schedule", "technician", "appointment", "book", "visit", "send someone"],
+            "callback": ["call back", "later", "not now", "another time", "goodbye"],
+            "photo": ["photo", "picture", "image", "upload"],
+            "resolved": ["fixed", "worked", "helped", "resolved", "all good"],
+            "not_resolved": ["not working", "didn't help", "still broken", "same issue"],
+            "cancel": ["cancel", "never mind", "hang up", "goodbye"],
+            "select_slot": ["option", "first", "second", "third", "one", "two", "three"],
+            "done": ["done", "uploaded", "finished", "sent"],
+            "skip": ["skip", "schedule", "technician", "forget"],
+            "more_time": ["wait", "more time", "minute", "hold on", "not yet"],
+            "resend": ["resend", "send again", "another email", "didn't get"],
+            "describe_problem": ["not working", "broken", "issue", "problem", "error"],
+            "unsure": ["don't know", "not sure", "no idea"],
+        }
+        for c in choices:
+            hints = _choice_hints.get(c, [])
+            if any(h in text_lower for h in hints):
+                return {"choice": c, "confidence": 0.75}
+        return fallback
+
+    try:
+        choices_str = ", ".join(f'"{c}"' for c in choices)
+        prompt = f"""Classify the caller's intent from their response.
+
+Context: {context}
+Valid choices: [{choices_str}]
+Caller said: "{user_text}"
+
+Rules:
+- Pick the single best matching choice
+- If the caller clearly wants one option, confidence should be >= 0.8
+- If ambiguous, set confidence < 0.5
+- If completely unrelated, use "unclear"
+
+Return ONLY valid JSON:
+{{"choice": "...", "confidence": 0.0}}"""
+
+        result = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.0, "max_output_tokens": 64},
+        )
+        raw = result.text.strip()
+        if "```" in raw:
+            raw = re.sub(r"```[a-z]*\n?", "", raw).replace("```", "").strip()
+        json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if json_match:
+            raw = json_match.group(0)
+        data = json.loads(raw)
+        choice = data.get("choice", "unclear")
+        if choice not in choices and choice != "unclear":
+            choice = "unclear"
+        confidence = min(1.0, max(0.0, float(data.get("confidence", 0.0))))
+        logger.debug(f"LLM intent: '{user_text}' -> {choice} ({confidence:.2f})")
+        return {"choice": choice, "confidence": confidence}
+    except Exception as e:
+        logger.warning(f"LLM intent classification failed: {e}")
+        return fallback
+
+
+def llm_extract_zip_code(speech_text: str) -> str | None:
+    """
+    Use LLM to extract a 5-digit US ZIP code from natural speech.
+    Handles spoken digits, number words, and STT artifacts.
+
+    Returns 5-digit string or None.
+    """
+    if not speech_text or not speech_text.strip():
+        return None
+
+    # Quick regex check first — if 5+ digits exist, extract them
+    digits = re.sub(r'\D', '', speech_text)
+    if len(digits) >= 5:
+        return digits[:5]
+
+    if not model:
+        return None
+
+    try:
+        prompt = f"""Extract the 5-digit US ZIP code from this phone call speech.
+
+Speech: "{speech_text}"
+
+Rules:
+- Convert number words to digits: "six oh six oh one" = "60601"
+- Handle STT artifacts: "6. 0. 6. 0. 1." = "60601"
+- "triple nine" patterns: "nine nine nine" = "999"
+- Return ONLY the 5 digits, nothing else
+- If no valid ZIP code can be extracted, return "none"
+
+ZIP code:"""
+        result = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.0, "max_output_tokens": 10},
+        )
+        raw = result.text.strip().replace(" ", "")
+        clean = re.sub(r'\D', '', raw)
+        if len(clean) == 5:
+            return clean
+        return None
+    except Exception as e:
+        logger.warning(f"LLM ZIP extraction failed: {e}")
+        return None
+
+
+def llm_extract_time_preference(speech_text: str) -> str | None:
+    """
+    Use LLM to extract morning/afternoon preference from natural speech.
+    Returns "morning", "afternoon", or None.
+    """
+    if not speech_text or not speech_text.strip():
+        return None
+    if not model:
+        text_lower = speech_text.lower()
+        if "morning" in text_lower:
+            return "morning"
+        if "afternoon" in text_lower or "evening" in text_lower:
+            return "afternoon"
+        return None
+
+    try:
+        prompt = f"""The caller was asked if they prefer a morning or afternoon appointment.
+
+Caller said: "{speech_text}"
+
+Rules:
+- "morning", "early", "AM", "before noon" → morning
+- "afternoon", "evening", "PM", "after lunch", "later in the day" → afternoon
+- "anytime", "doesn't matter", "either" → anytime
+- If unclear → unclear
+
+Return ONLY one word: morning, afternoon, anytime, or unclear"""
+
+        result = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.0, "max_output_tokens": 10},
+        )
+        raw = result.text.strip().lower()
+        if raw in ("morning", "afternoon", "anytime"):
+            return raw if raw != "anytime" else None
+        return None
+    except Exception as e:
+        logger.warning(f"LLM time pref extraction failed: {e}")
+        return None
+
+
+def llm_choose_slot(speech_text: str, slots_description: str) -> int | None:
+    """
+    Use LLM to match the caller's slot selection to one of the offered slots.
+    Returns 0-based index or None.
+    """
+    if not speech_text or not speech_text.strip():
+        return None
+    if not model:
+        return None
+
+    try:
+        prompt = f"""The caller was offered appointment slots and needs to pick one.
+
+Available slots:
+{slots_description}
+
+Caller said: "{speech_text}"
+
+Rules:
+- Match by option number: "option 1", "the first one", "one" → 0
+- Match by day name: "Sunday", "Monday" → index of that slot
+- Match by date: "February 15th" → index of that slot
+- Match by time: "the morning one", "the 9 AM" → index of that slot
+- Return ONLY the 0-based index number (0, 1, or 2)
+- If cannot determine, return "none"
+
+Index:"""
+        result = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.0, "max_output_tokens": 10},
+        )
+        raw = result.text.strip()
+        clean = re.sub(r'\D', '', raw)
+        if clean and int(clean) in (0, 1, 2):
+            return int(clean)
+        return None
+    except Exception as e:
+        logger.warning(f"LLM slot selection failed: {e}")
+        return None
+
+
+def llm_interpret_upload_intent(speech_text: str) -> str:
+    """
+    Interpret caller's intent during the upload waiting step.
+    Returns one of: "done", "skip", "more_time", "resend", "unclear"
+    """
+    if not speech_text or not speech_text.strip():
+        return "unclear"
+    if not model:
+        return "unclear"
+
+    try:
+        prompt = f"""The caller is on hold while uploading a photo via email link.
+
+Caller said: "{speech_text}"
+
+Classify their intent:
+- "done" = they finished uploading (done, uploaded, finished, sent it, I did it)
+- "skip" = they want to skip upload and schedule a technician (skip, schedule, technician, forget it, just book)
+- "more_time" = they need more time (yes, wait, more time, one minute, hold on, not yet)
+- "resend" = they want the email link resent (send again, resend, didn't get it, another email)
+- "unclear" = cannot determine
+
+Return ONLY one word: done, skip, more_time, resend, or unclear"""
+
+        result = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.0, "max_output_tokens": 10},
+        )
+        raw = result.text.strip().lower().split()[0] if result.text.strip() else "unclear"
+        if raw in ("done", "skip", "more_time", "resend"):
+            return raw
+        return "unclear"
+    except Exception as e:
+        logger.warning(f"LLM upload intent failed: {e}")
+        return "unclear"
+
+
+def llm_interpret_after_analysis(speech_text: str) -> str:
+    """
+    Interpret caller's response after hearing image analysis results.
+    Returns one of: "resolved", "schedule", "try_fix", "unclear"
+    """
+    if not speech_text or not speech_text.strip():
+        return "unclear"
+    if not model:
+        return "unclear"
+
+    try:
+        prompt = f"""The caller just heard AI analysis of their appliance photo with a suggested fix.
+The agent asked: "Would you like to try that, or should I schedule a technician?"
+
+Caller said: "{speech_text}"
+
+Classify their intent:
+- "resolved" = issue is fixed / they're satisfied (it worked, that fixed it, all good, yes it helped, great)
+- "schedule" = they want a technician (schedule, technician, send someone, didn't work, still broken, no luck, not working)
+- "try_fix" = they want to try the suggested fix (I'll try, let me try, okay I'll do that, sure)
+- "unclear" = cannot determine
+
+Return ONLY one word: resolved, schedule, try_fix, or unclear"""
+
+        result = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.0, "max_output_tokens": 10},
+        )
+        raw = result.text.strip().lower().split()[0] if result.text.strip() else "unclear"
+        if raw in ("resolved", "schedule", "try_fix"):
+            return raw
+        return "unclear"
+    except Exception as e:
+        logger.warning(f"LLM after-analysis intent failed: {e}")
+        return "unclear"
 
 
 def llm_classify_confirmation(user_text: str, context: str = "") -> dict:
