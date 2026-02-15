@@ -932,6 +932,199 @@ def llm_analyze_customer_intent(speech_text: str) -> dict:
         return kw_result
 
 
+def llm_plan_next_step(user_text: str, state: dict) -> str:
+    """
+    Goal-grounded autonomous planner.
+
+    Returns the next executable step from a strict allowlist. This keeps the
+    agent autonomous while preventing off-policy behavior.
+    """
+    allowed_steps = {
+        "greet_ask_name",
+        "understand_need",
+        "ask_symptoms",
+        "offer_troubleshoot_or_schedule",
+        "troubleshoot_all",
+        "confirm_resolution",
+        "offer_image_upload",
+        "collect_email",
+        "confirm_email",
+        "waiting_for_upload",
+        "speak_analysis",
+        "after_analysis",
+        "collect_zip",
+        "confirm_zip",
+        "collect_time_pref",
+        "choose_slot",
+        "done",
+    }
+
+    # Deterministic guards for in-flight operations.
+    current_step = state.get("step") or "greet_ask_name"
+    text = (user_text or "").strip()
+    text_lower = text.lower()
+
+    # Cross-cutting exit: "call back later" always routes to done
+    if any(k in text_lower for k in ["not now", "call back", "later", "goodbye", "another time"]):
+        return "done"
+
+    if state.get("appointment_booked") or state.get("resolved"):
+        return "done"
+    if state.get("pending_email"):
+        return "confirm_email"
+    if state.get("waiting_for_upload") and current_step not in ("speak_analysis", "after_analysis"):
+        return "waiting_for_upload"
+    if not state.get("customer_name"):
+        return "greet_ask_name"
+
+    # All conversation steps have their own built-in LLM routing / intent
+    # analysis.  The planner must NOT bypass them — just return the current
+    # step so each handler's own logic runs.
+    return current_step
+
+
+def llm_classify_confirmation(user_text: str, context: str = "") -> dict:
+    """
+    LLM fallback for confirmation intent when keywords don't match.
+    
+    Returns dict with:
+    - intent: "yes" | "no" | "correction" | "unclear"
+    - correction_value: str (if intent is "correction", the new value)
+    
+    Example inputs:
+    - "that's right" → {"intent": "yes"}
+    - "correct" → {"intent": "yes"}
+    - "no it's 60604" → {"intent": "correction", "correction_value": "60604"}
+    - "actually 60604" → {"intent": "correction", "correction_value": "60604"}
+    - "hmm let me think" → {"intent": "unclear"}
+    """
+    fallback = {"intent": "unclear", "correction_value": None}
+    
+    if not model:
+        return fallback
+    
+    try:
+        prompt = f"""Classify the user's response to a confirmation question.
+
+Context: {context if context else "Agent asked for yes/no confirmation"}
+User said: "{user_text}"
+
+Return ONLY valid JSON with:
+- "intent": one of "yes", "no", "correction", "unclear"
+- "correction_value": if intent is "correction", extract the corrected value (e.g., ZIP code, email); otherwise null
+
+Examples:
+- "that's right" → {{"intent": "yes", "correction_value": null}}
+- "correct" → {{"intent": "yes", "correction_value": null}}
+- "yep" → {{"intent": "yes", "correction_value": null}}
+- "no" → {{"intent": "no", "correction_value": null}}
+- "no it's 60604" → {{"intent": "correction", "correction_value": "60604"}}
+- "actually 60604" → {{"intent": "correction", "correction_value": "60604"}}
+- "wait let me check" → {{"intent": "unclear", "correction_value": null}}
+
+JSON:"""
+
+        result = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.0, "max_output_tokens": 64}
+        )
+        raw = result.text.strip()
+        
+        # Extract JSON from response
+        if "```" in raw:
+            raw = re.sub(r"```[a-z]*\n?", "", raw).replace("```", "").strip()
+        json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if json_match:
+            raw = json_match.group(0)
+        
+        data = json.loads(raw)
+        intent = data.get("intent", "unclear")
+        if intent not in ("yes", "no", "correction", "unclear"):
+            intent = "unclear"
+        
+        logger.debug(f"LLM confirmation: '{user_text}' -> {data}")
+        return {
+            "intent": intent,
+            "correction_value": data.get("correction_value")
+        }
+        
+    except Exception as e:
+        logger.warning(f"LLM confirmation fallback failed: {e}")
+        return fallback
+
+
+def llm_classify_choice(user_text: str, choices: list[str], context: str = "") -> dict:
+    """
+    LLM fallback for choice/routing intent when keywords don't match.
+    
+    Args:
+        user_text: What the user said
+        choices: List of valid choices, e.g. ["troubleshoot", "schedule", "callback", "photo"]
+        context: Optional context about what was offered
+    
+    Returns dict with:
+    - choice: one of the provided choices, or "unclear"
+    - confidence: float 0-1
+    
+    Example:
+    - "I think I want to try fixing it myself" → {"choice": "troubleshoot", "confidence": 0.9}
+    - "just send someone" → {"choice": "schedule", "confidence": 0.95}
+    - "I'll call back another time" → {"choice": "callback", "confidence": 0.9}
+    """
+    fallback = {"choice": "unclear", "confidence": 0.0}
+    
+    if not model:
+        return fallback
+    
+    try:
+        choices_str = ", ".join(f'"{c}"' for c in choices)
+        prompt = f"""Classify the user's choice from their response.
+
+Context: {context if context else "Agent offered multiple options"}
+Valid choices: [{choices_str}]
+User said: "{user_text}"
+
+Return ONLY valid JSON with:
+- "choice": one of [{choices_str}] or "unclear" if can't determine
+- "confidence": float between 0 and 1
+
+Examples for choices ["troubleshoot", "schedule", "callback"]:
+- "I want to try fixing it" → {{"choice": "troubleshoot", "confidence": 0.9}}
+- "let's try the steps" → {{"choice": "troubleshoot", "confidence": 0.85}}
+- "just send a technician" → {{"choice": "schedule", "confidence": 0.95}}
+- "I'll call back later" → {{"choice": "callback", "confidence": 0.9}}
+- "hmm not sure" → {{"choice": "unclear", "confidence": 0.3}}
+
+JSON:"""
+
+        result = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.0, "max_output_tokens": 64}
+        )
+        raw = result.text.strip()
+        
+        # Extract JSON from response
+        if "```" in raw:
+            raw = re.sub(r"```[a-z]*\n?", "", raw).replace("```", "").strip()
+        json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if json_match:
+            raw = json_match.group(0)
+        
+        data = json.loads(raw)
+        choice = data.get("choice", "unclear")
+        if choice not in choices and choice != "unclear":
+            choice = "unclear"
+        
+        confidence = float(data.get("confidence", 0.0))
+        
+        logger.debug(f"LLM choice: '{user_text}' -> {choice} (conf={confidence:.2f})")
+        return {"choice": choice, "confidence": confidence}
+        
+    except Exception as e:
+        logger.warning(f"LLM choice fallback failed: {e}")
+        return fallback
+
+
 def llm_extract_symptoms(user_text: str) -> dict:
     """
     Uses Gemini to extract structured symptom information from user text.

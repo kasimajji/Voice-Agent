@@ -31,6 +31,10 @@ STT_CONFIDENCE_THRESHOLD = float(os.getenv("STT_CONFIDENCE_THRESHOLD", "0.4"))
 STT_SILENCE_TIMEOUT_MS = int(os.getenv("STT_SILENCE_TIMEOUT_MS", "800"))
 STT_LANGUAGE_CODE = os.getenv("STT_LANGUAGE_CODE", "en-US")
 
+# Autonomous orchestration mode. When enabled, conversation routing is driven by
+# intent + pending goals rather than explicit step-based branching.
+AUTONOMOUS_AGENT_MODE = os.getenv("AUTONOMOUS_AGENT_MODE", "false").lower() == "true"
+
 # Use basic logging here since logging_config may not be loaded yet
 _config_logger = logging.getLogger("voice_agent.config")
 

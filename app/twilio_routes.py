@@ -7,6 +7,7 @@ from twilio.twiml.voice_response import VoiceResponse, Say
 from .config import (
     APP_BASE_URL, TTS_VOICE, STT_SPEECH_MODEL,
     USE_STREAMING_STT, STT_CONFIDENCE_THRESHOLD,
+    AUTONOMOUS_AGENT_MODE,
     get_base_url_from_request,
 )
 from .stt_stream import get_transcript, clear_transcript, wait_for_transcript
@@ -24,7 +25,10 @@ from .llm import (
     llm_extract_email,
     llm_extract_name,
     llm_analyze_customer_intent,
+    llm_plan_next_step,
     llm_interpret_troubleshooting_response,
+    llm_classify_confirmation,
+    llm_classify_choice,
 )
 from .scheduling import find_available_slots, book_appointment, format_slot_for_speech
 from .image_service import (
@@ -292,24 +296,63 @@ async def voice_continue(request: Request):
                 pass
         turn_start = state.get("_turn_start_ts", 0.0)
         
-        # ── Google STT as fallback when Twilio returns empty/silence ──
-        # Only use Google STT transcript if Twilio didn't capture anything useful.
-        # Google STT via silence-based batching lags behind Twilio's real-time Gather,
-        # so we only use it as a safety net, not as a replacement.
+        # ── Smart STT selection: pick the BEST transcript ──
+        # Compare Google STT streaming vs Twilio STT and pick the winner based on
+        # confidence. Neither is universally better: Twilio excels at short/numeric
+        # utterances (ZIP codes, yes/no), Google STT excels at longer sentences.
         if USE_STREAMING_STT and call_sid:
             stream_transcript = get_transcript(call_sid, not_before=turn_start)
-            if not speech_result.strip() and stream_transcript and stream_transcript.get("text"):
+            if stream_transcript and stream_transcript.get("text"):
                 stream_text = stream_transcript["text"]
                 stream_conf = stream_transcript.get("confidence", 0.0)
-                logger.info(
-                    f"Google STT fallback (Twilio was empty): '{stream_text[:60]}' (conf={stream_conf:.2f})",
-                    extra={"call_sid": call_sid},
-                )
-                speech_result = stream_text
+                is_final = stream_transcript.get("is_final", False)
+                
+                # Parse Twilio confidence for comparison
+                twilio_conf = 0.0
+                try:
+                    twilio_conf = float(twilio_confidence) if twilio_confidence else 0.0
+                except (ValueError, TypeError):
+                    pass
+                
+                if not speech_result.strip():
+                    # Twilio returned nothing — use Google STT (rescue)
+                    logger.info(
+                        f"[STT rescue] Google='{stream_text[:60]}' (conf={stream_conf:.2f}, final={is_final})",
+                        extra={"call_sid": call_sid},
+                    )
+                    speech_result = stream_text
+                elif is_final and stream_conf > twilio_conf:
+                    # Google STT has higher confidence — prefer it
+                    logger.info(
+                        f"[STT pick Google] '{stream_text[:60]}' (conf={stream_conf:.2f}) "
+                        f"over Twilio: '{speech_result[:60]}' (conf={twilio_conf:.2f})",
+                        extra={"call_sid": call_sid},
+                    )
+                    speech_result = stream_text
+                else:
+                    # Twilio has equal or higher confidence — keep it
+                    logger.info(
+                        f"[STT pick Twilio] '{speech_result[:60]}' (conf={twilio_conf:.2f}) "
+                        f"over Google: '{stream_text[:60]}' (conf={stream_conf:.2f})",
+                        extra={"call_sid": call_sid},
+                    )
             clear_transcript(call_sid)
         
         # Log customer speech
         log_conversation(call_sid, "CUSTOMER", speech_result or "(silence)", current_step)
+
+        # ── Autonomous planner routing (feature-flagged) ──
+        # In autonomous mode, we compute the next step from goal-grounded
+        # intent/state planning instead of relying solely on static transitions.
+        if AUTONOMOUS_AGENT_MODE:
+            planned_step = llm_plan_next_step(speech_result, state)
+            if planned_step and planned_step != state.get("step"):
+                logger.info(
+                    f"[Autonomous planner] step {state.get('step')} -> {planned_step}",
+                    extra={"call_sid": call_sid},
+                )
+                state["step"] = planned_step
+                update_state(call_sid, state)
         
         response = VoiceResponse()
         
@@ -337,9 +380,34 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
     current_step = state.get("step", "greet_ask_name")
     customer_name = state.get("customer_name", "")
     name_phrase = f", {customer_name}" if customer_name else ""
+
+    # Explicit terminal handler for autonomous planner routing.
+    # Without this, planner-selected "done" can fall through to the generic
+    # error branch and produce a confusing system message.
+    if current_step == "done":
+        text_lower = (speech_result or "").lower()
+        logger.info("Handling terminal done step", extra={"call_sid": call_sid, "step": "done"})
+        if any(kw in text_lower for kw in ["call back", "not now", "later", "another time"]):
+            goodbye_text = (
+                f"No problem{name_phrase}. You can call us back anytime when you're ready. "
+                "Thank you for calling Sears Home Services. Goodbye."
+            )
+        elif state.get("appointment_booked"):
+            goodbye_text = "Thank you for calling Sears Home Services. Goodbye."
+        elif state.get("resolved"):
+            goodbye_text = "Great, glad we could help. Thank you for calling Sears Home Services. Goodbye."
+        else:
+            goodbye_text = "Thank you for calling Sears Home Services. Goodbye."
+
+        say_obj = say_with_logging(goodbye_text, call_sid, "done")
+        response.append(say_obj)
+        response.hangup()
+        return Response(content=str(response), media_type="application/xml")
     
     # ==================== NO-INPUT HANDLING ====================
-    if not speech_result.strip():
+    # speak_analysis arrives via redirect (no speech expected) — skip no-input entirely,
+    # let the step handler below speak the analysis results
+    if not speech_result.strip() and current_step != "speak_analysis":
         state["no_input_attempts"] = state.get("no_input_attempts", 0) + 1
         update_state(call_sid, state)
         
@@ -349,6 +417,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             
             if upload_status and upload_status.get("analysis_ready"):
                 state["step"] = "speak_analysis"
+                state["waiting_for_upload"] = False
                 state["no_input_attempts"] = 0
                 update_state(call_sid, state)
                 logger.info("Auto-detected image upload, speaking results", extra={"call_sid": call_sid, "step": "waiting_for_upload"})
@@ -616,14 +685,64 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
     elif current_step == "offer_troubleshoot_or_schedule":
         text_lower = speech_result.lower()
         
-        scheduling_words = ["schedule", "technician", "appointment", "book", "visit", "skip", "no", "nope", "straight", "directly"]
+        # Keyword-first approach
+        callback_words = ["call back", "later", "not now", "another time", "goodbye"]
+        scheduling_words = ["schedule", "technician", "appointment", "book", "visit", "skip", "straight", "directly"]
         troubleshoot_words = ["troubleshoot", "try", "steps", "yes", "yeah", "sure", "okay", "ok", "walk", "help"]
         
+        # Check keywords first
+        wants_callback = any(w in text_lower for w in callback_words)
         wants_schedule = any(w in text_lower for w in scheduling_words)
         wants_troubleshoot = any(w in text_lower for w in troubleshoot_words)
         
-        if wants_schedule and not wants_troubleshoot:
-            # Skip to scheduling
+        # Determine choice from keywords
+        choice = None
+        if wants_callback:
+            choice = "callback"
+        elif wants_schedule and not wants_troubleshoot:
+            choice = "schedule"
+        elif wants_troubleshoot and not wants_schedule:
+            choice = "troubleshoot"
+        elif wants_schedule and wants_troubleshoot:
+            # Ambiguous — use LLM
+            choice = None
+        elif not wants_schedule and not wants_troubleshoot:
+            # No keywords matched — use LLM fallback
+            choice = None
+        
+        # LLM fallback when keywords are ambiguous or don't match
+        if choice is None:
+            llm_result = llm_classify_choice(
+                speech_result,
+                choices=["troubleshoot", "schedule", "callback"],
+                context="Agent asked: Would you like troubleshooting steps or schedule a technician?"
+            )
+            llm_choice = llm_result.get("choice", "unclear")
+            llm_conf = llm_result.get("confidence", 0.0)
+            
+            logger.debug(f"Troubleshoot/schedule LLM fallback: {llm_result}", extra={"call_sid": call_sid, "step": "offer_troubleshoot_or_schedule"})
+            
+            if llm_choice in ("troubleshoot", "schedule", "callback") and llm_conf >= 0.6:
+                choice = llm_choice
+            else:
+                # Default to troubleshooting if still unclear
+                choice = "troubleshoot"
+        
+        # Execute the choice
+        if choice == "callback":
+            state["step"] = "done"
+            update_state(call_sid, state)
+
+            goodbye_text = (
+                f"No worries{name_phrase}. Feel free to reach out anytime if you need help. "
+                "Thank you for calling Sears Home Services. Goodbye."
+            )
+            say_obj = say_with_logging(goodbye_text, call_sid, "offer_troubleshoot_or_schedule")
+            response.append(say_obj)
+            response.hangup()
+            return Response(content=str(response), media_type="application/xml")
+
+        elif choice == "schedule":
             state["step"] = "collect_zip"
             update_state(call_sid, state)
             
@@ -634,8 +753,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             ))
             response.redirect(continue_url)
         
-        elif wants_troubleshoot or (not wants_schedule and not wants_troubleshoot):
-            # Present ALL troubleshooting steps at once (per requirement)
+        else:  # troubleshoot
             state["step"] = "troubleshoot_all"
             state["troubleshooting_step"] = 0
             update_state(call_sid, state)
@@ -667,59 +785,88 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                     "or I can schedule a technician. Which would you prefer?"
                 ))
                 response.redirect(continue_url)
-        else:
-            # Ambiguous — default to troubleshooting
-            state["step"] = "troubleshoot_all"
-            state["troubleshooting_step"] = 0
-            update_state(call_sid, state)
-            
-            appliance = state.get("appliance_type", "appliance")
-            steps_summary = get_troubleshooting_steps_summary(appliance)
-            state["troubleshooting_steps_text"] = steps_summary
-            update_state(call_sid, state)
-            
-            gather = _build_gather(response, continue_url, timeout=15, speech_timeout="4")
-            if steps_summary:
-                agent_text = (
-                    f"Let me share a few quick checks{name_phrase}: "
-                    f"{steps_summary} "
-                    "Please try these and let me know if any of them helped."
-                )
-            else:
-                agent_text = (
-                    "Let me help you schedule a technician. What is your ZIP code?"
-                )
-                state["step"] = "collect_zip"
-                update_state(call_sid, state)
-            
-            log_conversation(call_sid, "AGENT", agent_text, "troubleshoot_all")
-            gather.append(create_ssml_say(agent_text))
-            response.redirect(continue_url)
     
     elif current_step == "ask_symptoms":
-        # Store raw symptoms
+        text_lower = speech_result.lower()
         state["symptoms"] = speech_result
-        
-        # Use Gemini to extract structured symptom information
-        extracted = llm_extract_symptoms(speech_result)
-        state["symptom_summary"] = extracted.get("symptom_summary") or speech_result
-        state["error_codes"] = extracted.get("error_codes") or []
-        state["is_urgent"] = bool(extracted.get("is_urgent"))
-        
-        # Go to offer troubleshoot or schedule
-        state["step"] = "offer_troubleshoot_or_schedule"
-        update_state(call_sid, state)
-        
-        logger.info(f"Symptoms captured: {speech_result[:100]}", extra={"call_sid": call_sid, "step": "ask_symptoms"})
-        
-        summary = state["symptom_summary"]
-        gather = _build_gather(response, continue_url, timeout=8, speech_timeout="3")
-        gather.append(create_ssml_say(
-            f"I understand{name_phrase}. {summary}. "
-            "Would you like me to walk you through a few quick troubleshooting steps, "
-            "or would you prefer to schedule a technician right away?"
-        ))
-        response.redirect(continue_url)
+
+        # Handle callback/later intent at ask_symptoms
+        callback_words = ["call back", "call you back", "later", "not now", "another time", "goodbye"]
+        if any(kw in text_lower for kw in callback_words):
+            state["step"] = "done"
+            update_state(call_sid, state)
+            
+            goodbye_text = (
+                f"No problem{name_phrase}. You can call us back anytime when you're ready. "
+                "Thank you for calling Sears Home Services. Goodbye."
+            )
+            say_obj = say_with_logging(goodbye_text, call_sid, "ask_symptoms")
+            response.append(say_obj)
+            response.hangup()
+            return Response(content=str(response), media_type="application/xml")
+
+        # If user explicitly says they don't know details, move forward gracefully.
+        unsure_words = ["don't know", "do not know", "not sure", "no idea", "not really"]
+        user_unsure = any(w in text_lower for w in unsure_words)
+
+        # Detect whether a concrete problem was actually described.
+        # Example of low-detail input: "I'm calling about my refrigerator."
+        problem_markers = [
+            "not ", "won't", "doesn't", "error", "code", "leak", "noise",
+            "broken", "stopped", "warm", "cooling", "heating", "smell", "spark",
+        ]
+        has_problem_marker = any(m in text_lower for m in problem_markers)
+
+        if not user_unsure and not has_problem_marker:
+            # Stay in ask_symptoms and ask for specific details.
+            update_state(call_sid, state)
+            gather = _build_gather(response, continue_url, timeout=10, speech_timeout="4")
+            gather.append(create_ssml_say(
+                f"Thanks{name_phrase}. I heard it's your {state.get('appliance_type', 'appliance')}. "
+                "What exactly is the issue? For example, not cooling, leaking, making noise, or an error code. "
+                "If you don't know, just say I don't know."
+            ))
+            response.redirect(continue_url)
+        else:
+            if user_unsure:
+                state["symptom_summary"] = (
+                    f"Customer reported an issue with {state.get('appliance_type', 'the appliance')} "
+                    "but could not provide specific symptoms."
+                )
+                state["error_codes"] = []
+                state["is_urgent"] = False
+            else:
+                extracted = llm_extract_symptoms(speech_result)
+                summary = extracted.get("symptom_summary") or speech_result
+                # Avoid speaking awkward meta-text back to the customer.
+                # LLM sometimes returns third-person descriptions like:
+                # "The caller is reporting...", "The caller did not provide...",
+                # "The customer has an issue...", "No error codes were mentioned..."
+                meta_prefixes = [
+                    "the caller", "the customer", "the user",
+                    "no error codes", "no specific", "no further",
+                ]
+                if any(summary.lower().startswith(p) for p in meta_prefixes):
+                    # Replace with a natural second-person version
+                    appliance = state.get('appliance_type', 'appliance')
+                    summary = f"Your {appliance} is not working properly."
+                state["symptom_summary"] = summary
+                state["error_codes"] = extracted.get("error_codes") or []
+                state["is_urgent"] = bool(extracted.get("is_urgent"))
+
+            state["step"] = "offer_troubleshoot_or_schedule"
+            update_state(call_sid, state)
+
+            logger.info(f"Symptoms captured: {speech_result[:100]}", extra={"call_sid": call_sid, "step": "ask_symptoms"})
+
+            summary = state["symptom_summary"]
+            gather = _build_gather(response, continue_url, timeout=8, speech_timeout="3")
+            gather.append(create_ssml_say(
+                f"I understand{name_phrase}. {summary}. "
+                "Would you like me to walk you through a few quick troubleshooting steps, "
+                "or would you prefer to schedule a technician right away?"
+            ))
+            response.redirect(continue_url)
     
     # ==================== TROUBLESHOOTING (ALL STEPS AT ONCE) ====================
     
@@ -803,20 +950,42 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             response.redirect(continue_url)
         
         else:
-            # Didn't help — offer image upload or scheduling
-            state["step"] = "offer_image_upload"
-            update_state(call_sid, state)
+            # Check if response is too short/garbled — likely captured while agent
+            # was still speaking the troubleshooting steps. Re-prompt instead of
+            # assuming the steps didn't help.
+            clean_text = re.sub(r'[^a-zA-Z\s]', '', speech_result).strip()
+            ts_attempts = state.get("troubleshoot_reprompt", 0)
             
-            gather = _build_gather(response, continue_url, timeout=8, speech_timeout="3")
-            gather.append(create_ssml_say(
-                f"I understand{name_phrase}, those steps didn't help. "
-                "I can send you a link to upload a photo of your appliance for AI diagnosis, "
-                "or I can help you schedule a technician to come take a look. "
-                "Which would you prefer?"
-            ))
+            if len(clean_text) < 10 and ts_attempts < 2:
+                # Too short to be a real response — re-prompt
+                state["troubleshoot_reprompt"] = ts_attempts + 1
+                update_state(call_sid, state)
+                
+                logger.debug(f"Troubleshoot response too short ({len(clean_text)} chars), re-prompting", extra={"call_sid": call_sid, "step": "troubleshoot_all"})
+                
+                gather = _build_gather(response, continue_url, timeout=15, speech_timeout="4")
+                gather.append(create_ssml_say(
+                    f"Take your time{name_phrase}. Once you've tried those steps, "
+                    "let me know if any of them helped, or if you'd like to schedule a technician."
+                ))
+                response.redirect(continue_url)
+            else:
+                # Didn't help — offer image upload or scheduling
+                state["step"] = "offer_image_upload"
+                state["troubleshoot_reprompt"] = 0
+                update_state(call_sid, state)
+                
+                gather = _build_gather(response, continue_url, timeout=8, speech_timeout="3")
+                gather.append(create_ssml_say(
+                    f"I understand{name_phrase}, those steps didn't help. "
+                    "I can send you a link to upload a photo of your appliance for AI diagnosis, "
+                    "or I can help you schedule a technician to come take a look. "
+                    "Which would you prefer?"
+                ))
             response.redirect(continue_url)
     
     elif current_step == "confirm_resolution":
+        # Keyword-first approach
         if is_yes_response(speech_result):
             state["resolved"] = True
             state["step"] = "done"
@@ -830,7 +999,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 "Have a great day, and thank you for choosing Sears Home Services!"
             ))
             response.hangup()
-        else:
+        elif is_no_response(speech_result):
             # Not resolved — offer next options
             state["step"] = "offer_image_upload"
             update_state(call_sid, state)
@@ -841,11 +1010,83 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 "or schedule a technician. Which would you prefer?"
             ))
             response.redirect(continue_url)
+        else:
+            # LLM fallback when keywords don't match
+            llm_result = llm_classify_confirmation(
+                speech_result,
+                context="Agent asked: Is the issue resolved?"
+            )
+            intent = llm_result.get("intent", "unclear")
+            
+            logger.debug(f"Resolution confirm LLM fallback: {llm_result}", extra={"call_sid": call_sid, "step": "confirm_resolution"})
+            
+            if intent == "yes":
+                state["resolved"] = True
+                state["step"] = "done"
+                update_state(call_sid, state)
+                
+                log_call_end(call_sid, resolved=True, reason="Troubleshooting successful")
+                
+                response.append(create_ssml_say(
+                    f"Wonderful{name_phrase}! I'm so glad that worked! "
+                    "If you ever have any other issues, don't hesitate to give us a call. "
+                    "Have a great day, and thank you for choosing Sears Home Services!"
+                ))
+                response.hangup()
+            else:
+                # No or unclear — offer next options
+                state["step"] = "offer_image_upload"
+                update_state(call_sid, state)
+                
+                gather = _build_gather(response, continue_url, timeout=8, speech_timeout="3")
+                gather.append(create_ssml_say(
+                    f"No worries{name_phrase}. I can send you a link to upload a photo for AI diagnosis, "
+                    "or schedule a technician. Which would you prefer?"
+                ))
+                response.redirect(continue_url)
     
     elif current_step == "offer_image_upload":
         text_lower = speech_result.lower()
         
-        if "photo" in text_lower or "picture" in text_lower or "image" in text_lower or "upload" in text_lower or "visual" in text_lower:
+        # Keyword-first approach
+        callback_words = [
+            "call you back", "call back", "not right now", "not now", "later",
+            "another time", "i'll call", "i will call", "i can call",
+        ]
+        photo_words = ["photo", "picture", "image", "upload", "visual"]
+        schedule_words = ["technician", "schedule", "appointment", "visit", "book"]
+        
+        wants_photo = any(w in text_lower for w in photo_words)
+        wants_schedule = any(w in text_lower for w in schedule_words)
+        wants_callback = any(kw in text_lower for kw in callback_words)
+        
+        # Determine choice from keywords
+        choice = None
+        if wants_callback:
+            choice = "callback"
+        elif wants_photo and not wants_schedule:
+            choice = "photo"
+        elif wants_schedule and not wants_photo:
+            choice = "schedule"
+        else:
+            # No keywords or ambiguous — use LLM fallback
+            llm_result = llm_classify_choice(
+                speech_result,
+                choices=["photo", "schedule", "callback"],
+                context="Agent asked: Would you like to upload a photo for diagnosis or schedule a technician?"
+            )
+            llm_choice = llm_result.get("choice", "unclear")
+            llm_conf = llm_result.get("confidence", 0.0)
+            
+            logger.debug(f"Image/schedule LLM fallback: {llm_result}", extra={"call_sid": call_sid, "step": "offer_image_upload"})
+            
+            if llm_choice in ("photo", "schedule", "callback") and llm_conf >= 0.6:
+                choice = llm_choice
+            else:
+                choice = None  # Still unclear, ask again
+        
+        # Execute the choice
+        if choice == "photo":
             state["step"] = "collect_email"
             state["email_attempts"] = 0
             update_state(call_sid, state)
@@ -863,7 +1104,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             ))
             response.redirect(continue_url)
         
-        elif "technician" in text_lower or "schedule" in text_lower or "appointment" in text_lower or "visit" in text_lower or "book" in text_lower:
+        elif choice == "schedule":
             state["step"] = "collect_zip"
             update_state(call_sid, state)
             
@@ -875,8 +1116,23 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 "What is your ZIP code?"
             ))
             response.redirect(continue_url)
+
+        elif choice == "callback":
+            state["step"] = "done"
+            update_state(call_sid, state)
+
+            logger.info("User deferred service and will call back", extra={"call_sid": call_sid, "step": "offer_image_upload"})
+
+            goodbye_text = (
+                f"No problem{name_phrase}. You can call us back anytime when you're ready. "
+                "Thank you for calling Sears Home Services. Goodbye."
+            )
+            say_obj = say_with_logging(goodbye_text, call_sid, "offer_image_upload")
+            response.append(say_obj)
+            response.hangup()
         
         else:
+            # Still unclear — ask again
             gather = _build_gather(response, continue_url, timeout=10, speech_timeout="5")
             gather.append(create_ssml_say(
                 "I'm sorry, I didn't catch that. "
@@ -994,12 +1250,104 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 response.redirect(continue_url)
         
         else:
-            gather = _build_gather(response, continue_url, timeout=7, speech_timeout="3", language="en-US")
-            spelled = _spell_email_slow(pending_email) if pending_email else "the email"
-            gather.append(create_ssml_say(
-                f"I need a yes or no. Is {spelled} correct?"
-            ))
-            response.redirect(continue_url)
+            # LLM fallback when keywords don't match
+            llm_result = llm_classify_confirmation(
+                speech_result,
+                context=f"Agent asked: Is email {pending_email} correct?"
+            )
+            intent = llm_result.get("intent", "unclear")
+            correction = llm_result.get("correction_value")
+            
+            logger.debug(f"Email confirm LLM fallback: {llm_result}", extra={"call_sid": call_sid, "step": "confirm_email"})
+            
+            if intent == "yes":
+                # Same as keyword yes path
+                state["customer_email"] = pending_email
+                state["pending_email"] = None
+                
+                logger.info(f"Email confirmed via LLM: {pending_email}", extra={"call_sid": call_sid, "step": "confirm_email"})
+                
+                try:
+                    upload_token = create_image_upload_token(
+                        call_sid=call_sid,
+                        email=pending_email,
+                        appliance_type=state.get("appliance_type"),
+                        symptom_summary=state.get("symptom_summary")
+                    )
+                    
+                    upload_url = build_upload_url(upload_token.token)
+                    send_upload_email(pending_email, upload_url, state.get("appliance_type"))
+                    
+                    state["image_upload_sent"] = True
+                    state["upload_token"] = upload_token.token
+                    state["waiting_for_upload"] = True
+                    state["upload_poll_count"] = 0
+                    state["step"] = "waiting_for_upload"
+                    update_state(call_sid, state)
+                    
+                    gather = _build_gather(response, continue_url, timeout=15, speech_timeout="3")
+                    gather.append(create_ssml_say(
+                        "I've sent an upload link to your email. "
+                        "Please check your inbox, click the link, and upload a clear photo of your appliance. "
+                        "I'll stay on the line while you do this. "
+                        "Once you've uploaded the image, just say done or uploaded. "
+                        "If you'd rather skip and schedule a technician, say skip."
+                    ))
+                    response.redirect(continue_url)
+                    
+                except Exception as e:
+                    log_error(call_sid, e, step="confirm_email", context="Error creating upload token")
+                    state["step"] = "collect_zip"
+                    update_state(call_sid, state)
+                    
+                    gather = _build_gather(response, continue_url, timeout=5, speech_timeout="3")
+                    gather.append(create_ssml_say(
+                        "I'm sorry, there was an issue sending the upload link. "
+                        "Let me help you schedule a technician instead. "
+                        "What is your ZIP code?"
+                    ))
+                    response.redirect(continue_url)
+            
+            elif intent == "no" or intent == "correction":
+                # User said no or provided correction — re-collect email
+                state["email_confirm_attempts"] = state.get("email_confirm_attempts", 0) + 1
+                state["pending_email"] = None
+                
+                if state["email_confirm_attempts"] <= 2:
+                    state["step"] = "collect_email"
+                    update_state(call_sid, state)
+                    
+                    email_hints = ("gmail.com, yahoo.com, outlook.com, hotmail.com, icloud.com, "
+                                  "at gmail dot com, dot com, dot net, at the rate, "
+                                  "zero, one, two, three, four, five, six, seven, eight, nine")
+                    gather = _build_gather(response, continue_url, timeout=10, speech_timeout="4",
+                                           hints=email_hints, language="en-US")
+                    gather.append(create_ssml_say(
+                        "No problem, let's try again. "
+                        "Please spell your email slowly, letter by letter. "
+                        "Say dot for periods and at for the at symbol."
+                    ))
+                    response.redirect(continue_url)
+                else:
+                    state["step"] = "collect_zip"
+                    update_state(call_sid, state)
+                    
+                    gather = _build_gather(response, continue_url, timeout=5, speech_timeout="3", language="en-US")
+                    gather.append(create_ssml_say(
+                        "I'm having trouble with the email. "
+                        "Let me help you schedule a technician instead. "
+                        "What is your ZIP code?"
+                    ))
+                    response.redirect(continue_url)
+            
+            else:
+                # Still unclear — ask again
+                gather = _build_gather(response, continue_url, timeout=7, speech_timeout="3", language="en-US")
+                spelled = _spell_email_slow(pending_email) if pending_email else "the email"
+                gather.append(create_ssml_say(
+                    f"I need a yes or no. Is {spelled} correct?"
+                ))
+                response.redirect(continue_url)
     
     # =========================================================================
     # IMAGE UPLOAD WAITING + ANALYSIS
@@ -1012,6 +1360,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
         upload_status = get_upload_status_by_call_sid(call_sid)
         if upload_status and upload_status.get("analysis_ready"):
             state["step"] = "speak_analysis"
+            state["waiting_for_upload"] = False
             state["upload_wait_attempts"] = 0
             update_state(call_sid, state)
             logger.info("Auto-detected image upload during speech", extra={"call_sid": call_sid, "step": "waiting_for_upload"})
@@ -1050,6 +1399,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             
             if upload_status and upload_status.get("analysis_ready"):
                 state["step"] = "speak_analysis"
+                state["waiting_for_upload"] = False
                 update_state(call_sid, state)
                 response.redirect(continue_url)
             
@@ -1078,6 +1428,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                     response.redirect(continue_url)
                 else:
                     state["step"] = "collect_zip"
+                    state["waiting_for_upload"] = False
                     update_state(call_sid, state)
                     
                     gather = _build_gather(response, continue_url, timeout=5, speech_timeout="3")
@@ -1107,6 +1458,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             
             if upload_status and upload_status.get("analysis_ready"):
                 state["step"] = "speak_analysis"
+                state["waiting_for_upload"] = False
                 update_state(call_sid, state)
                 response.redirect(continue_url)
             else:
@@ -1122,6 +1474,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                     response.redirect(continue_url)
                 else:
                     state["step"] = "collect_zip"
+                    state["waiting_for_upload"] = False
                     update_state(call_sid, state)
                     
                     gather = _build_gather(response, continue_url, timeout=5, speech_timeout="3")
@@ -1136,12 +1489,14 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
         
         if state.get("analysis_spoken"):
             state["step"] = "after_analysis"
+            state["waiting_for_upload"] = False
             update_state(call_sid, state)
             response.redirect(continue_url)
             return Response(content=str(response), media_type="application/xml")
         
         if not upload_status or not upload_status.get("analysis_ready"):
             state["step"] = "collect_zip"
+            state["waiting_for_upload"] = False
             update_state(call_sid, state)
             
             gather = _build_gather(response, continue_url, timeout=5, speech_timeout="3")
@@ -1154,6 +1509,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
         elif upload_status.get("is_appliance_image") == False:
             appliance = state.get("appliance_type") or "appliance"
             state["step"] = "waiting_for_upload"
+            state["waiting_for_upload"] = True
             state["upload_poll_count"] = 0
             update_state(call_sid, state)
             
@@ -1181,24 +1537,36 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             
             state["analysis_spoken"] = True
             state["step"] = "after_analysis"
+            state["waiting_for_upload"] = False
             update_state(call_sid, state)
             
             logger.info("Speaking analysis results to user", extra={"call_sid": call_sid, "step": "speak_analysis"})
             
-            analysis_speech = "Great news! I've analyzed your image. "
+            analysis_speech = "I've analyzed your image. "
             
+            # Keep summary brief for phone — just the key finding
             if summary:
-                if len(summary) > 300:
-                    summary = summary[:297] + "..."
+                # Truncate at sentence boundary if possible
+                if len(summary) > 150:
+                    dot_pos = summary[:150].rfind(".")
+                    summary = summary[:dot_pos + 1] if dot_pos > 50 else summary[:147] + "..."
                 analysis_speech += summary + " "
             
+            # Keep tips very short — just the most actionable one
             if tips:
-                if len(tips) > 200:
-                    tips = tips[:197] + "..."
-                analysis_speech += f"Here's what you can try: {tips} "
-                analysis_speech += "Let me know if that helps, or say schedule to book a technician."
-            else:
-                analysis_speech += "Based on what I see, I recommend scheduling a technician for a proper diagnosis. Would you like to schedule an appointment?"
+                # Extract just the first tip/step if multiple
+                first_tip = tips
+                for sep in ["Step 2:", "2.", "2)", "\n"]:
+                    idx = tips.find(sep)
+                    if idx > 10:
+                        first_tip = tips[:idx].strip()
+                        break
+                if len(first_tip) > 120:
+                    dot_pos = first_tip[:120].rfind(".")
+                    first_tip = first_tip[:dot_pos + 1] if dot_pos > 30 else first_tip[:117] + "..."
+                analysis_speech += f"Quick tip: {first_tip} "
+            
+            analysis_speech += "Would you like to try that, or should I schedule a technician?"
             
             gather = _build_gather(response, continue_url, timeout=10, speech_timeout="3")
             log_conversation(call_sid, "AGENT", analysis_speech, "speak_analysis")
@@ -1297,6 +1665,9 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 response.hangup()
     
     elif current_step == "confirm_zip":
+        zip_code = state.get("zip_code", "")
+        
+        # Keyword-first approach
         if is_yes_response(speech_result):
             state["step"] = "collect_time_pref"
             update_state(call_sid, state)
@@ -1317,12 +1688,68 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             ))
             response.redirect(continue_url)
         else:
-            gather = _build_gather(response, continue_url, timeout=5, speech_timeout="3")
-            zip_code = state.get("zip_code", "")
-            gather.append(create_ssml_say(
-                f"I need a yes or no. Is {' '.join(zip_code)} your correct ZIP code?"
-            ))
-            response.redirect(continue_url)
+            # LLM fallback when keywords don't match
+            llm_result = llm_classify_confirmation(
+                speech_result, 
+                context=f"Agent asked: Is ZIP code {zip_code} correct?"
+            )
+            intent = llm_result.get("intent", "unclear")
+            correction = llm_result.get("correction_value")
+            
+            logger.debug(f"ZIP confirm LLM fallback: {llm_result}", extra={"call_sid": call_sid, "step": "confirm_zip"})
+            
+            if intent == "yes":
+                state["step"] = "collect_time_pref"
+                update_state(call_sid, state)
+                
+                gather = _build_gather(response, continue_url, timeout=5, speech_timeout="3")
+                gather.append(create_ssml_say(
+                    "Do you prefer a morning or afternoon appointment?"
+                ))
+                response.redirect(continue_url)
+            elif intent == "no":
+                state["zip_code"] = None
+                state["step"] = "collect_zip"
+                update_state(call_sid, state)
+                
+                gather = _build_gather(response, continue_url, timeout=8, speech_timeout="4")
+                gather.append(create_ssml_say(
+                    "No problem, let me get that again. What is your ZIP code?"
+                ))
+                response.redirect(continue_url)
+            elif intent == "correction" and correction:
+                # User provided corrected ZIP inline (e.g., "no it's 60604")
+                digits = re.sub(r'\D', '', correction)
+                if len(digits) >= 5:
+                    state["zip_code"] = digits[:5]
+                    state["step"] = "confirm_zip"
+                    update_state(call_sid, state)
+                    
+                    logger.info(f"ZIP corrected to: {digits[:5]}", extra={"call_sid": call_sid, "step": "confirm_zip"})
+                    
+                    gather = _build_gather(response, continue_url, timeout=5, speech_timeout="3")
+                    gather.append(create_ssml_say(
+                        f"Got it. So that's {' '.join(digits[:5])}. Is that correct?"
+                    ))
+                    response.redirect(continue_url)
+                else:
+                    # Correction didn't have valid ZIP
+                    state["zip_code"] = None
+                    state["step"] = "collect_zip"
+                    update_state(call_sid, state)
+                    
+                    gather = _build_gather(response, continue_url, timeout=8, speech_timeout="4")
+                    gather.append(create_ssml_say(
+                        "I didn't catch that. What is your correct ZIP code?"
+                    ))
+                    response.redirect(continue_url)
+            else:
+                # Still unclear — ask again
+                gather = _build_gather(response, continue_url, timeout=5, speech_timeout="3")
+                gather.append(create_ssml_say(
+                    f"I need a yes or no. Is {' '.join(zip_code)} your correct ZIP code?"
+                ))
+                response.redirect(continue_url)
     
     elif current_step == "collect_time_pref":
         text_lower = speech_result.lower()
@@ -1379,93 +1806,166 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
         
         logger.debug(f"Offered slots count: {len(offered_slots)}, User said: '{speech_result}'", extra={"call_sid": call_sid, "step": "choose_slot"})
         
-        chosen_index = None
-        if "1" in text_lower or "one" in text_lower or "first" in text_lower or text_lower.strip() == "1":
-            chosen_index = 0
-        elif "2" in text_lower or "two" in text_lower or "second" in text_lower or text_lower.strip() == "2":
-            chosen_index = 1
-        elif "3" in text_lower or "three" in text_lower or "third" in text_lower or text_lower.strip() == "3":
-            chosen_index = 2
+        # ── Escape routes: let customer navigate away from slot selection ──
+        troubleshoot_words = ["troubleshoot", "try", "diagnose", "fix myself", "steps"]
+        cancel_words = ["cancel", "never mind", "nevermind", "goodbye", "hang up", "call back", "call again", "call you again"]
         
-        logger.debug(f"Chosen index: {chosen_index}, Slots available: {len(offered_slots)}", extra={"call_sid": call_sid, "step": "choose_slot"})
-        
-        if chosen_index is not None and chosen_index < len(offered_slots) and len(offered_slots) > 0:
-            chosen_slot = offered_slots[chosen_index]
-            customer_phone = state.get("customer_phone", "")
+        if any(w in text_lower for w in troubleshoot_words):
+            # Customer wants to go back to troubleshooting
+            state["step"] = "offer_troubleshoot_or_schedule"
+            update_state(call_sid, state)
             
-            try:
-                appt_info = book_appointment(
-                    call_sid=call_sid,
-                    customer_phone=customer_phone,
-                    zip_code=state.get("zip_code"),
-                    appliance_type=state.get("appliance_type"),
-                    symptom_summary=state.get("symptom_summary", ""),
-                    error_codes=state.get("error_codes", []),
-                    is_urgent=state.get("is_urgent", False),
-                    chosen_slot_id=chosen_slot["slot_id"]
-                )
-                
-                state["step"] = "done"
-                state["appointment_booked"] = True
-                state["appointment_id"] = appt_info["id"]
-                update_state(call_sid, state)
-                
-                logger.info(f"Appointment booked: ID={appt_info['id']}", extra={"call_sid": call_sid, "step": "choose_slot"})
-                
-                start = appt_info["start_time"]
-                day_name = start.strftime("%A")
-                date_str = start.strftime("%B %d")
-                hour = start.hour
-                if hour < 12:
-                    time_str = f"{hour} AM" if hour > 0 else "12 AM"
-                else:
-                    hour_12 = hour - 12 if hour > 12 else hour
-                    time_str = f"{hour_12} PM" if hour_12 > 0 else "12 PM"
-                
-                confirmation_text = (
-                    f"Your appointment is confirmed for {day_name}, {date_str} at {time_str} "
-                    f"with technician {appt_info['technician_name']}. "
-                    "You will receive a confirmation text shortly. "
-                    "Thank you for calling Sears Home Services. Goodbye."
-                )
-                say_obj = say_with_logging(confirmation_text, call_sid, "choose_slot")
-                response.append(say_obj)
-                response.hangup()
-                
-            except Exception as e:
-                log_error(call_sid, e, step="choose_slot", context="Booking failed")
-                state["step"] = "done"
-                update_state(call_sid, state)
-                
-                error_text = (
-                    "I'm sorry, there was an error booking your appointment. "
-                    "Please call back or visit our website to schedule. "
-                    "Thank you for calling Sears Home Services. Goodbye."
-                )
-                say_obj = say_with_logging(error_text, call_sid, "choose_slot")
-                response.append(say_obj)
-                response.hangup()
-        else:
-            if len(offered_slots) == 0:
-                logger.error("No slots available in state!", extra={"call_sid": call_sid, "step": "choose_slot"})
-                slots = find_available_slots(
-                    zip_code=state.get("zip_code"),
-                    appliance_type=state.get("appliance_type"),
-                    time_preference=state.get("time_preference"),
-                    limit=3
-                )
-                if slots:
-                    state["offered_slots"] = slots
-                    update_state(call_sid, state)
+            appliance = state.get("appliance_type", "appliance")
+            logger.info("Customer wants troubleshooting instead of scheduling", extra={"call_sid": call_sid, "step": "choose_slot"})
             
-            gather = _build_gather(response, continue_url, timeout=4, speech_timeout="2")
-            retry_text = (
-                "I'm sorry, I didn't understand your selection. "
-                "Please say option 1, option 2, or option 3."
-            )
-            say_obj = say_with_logging(retry_text, call_sid, "choose_slot")
-            gather.append(say_obj)
+            gather = _build_gather(response, continue_url, timeout=8, speech_timeout="3")
+            gather.append(create_ssml_say(
+                f"No problem{name_phrase}! Would you like me to walk you through some troubleshooting steps for your {appliance}?"
+            ))
             response.redirect(continue_url)
+        
+        elif any(w in text_lower for w in cancel_words):
+            # Customer wants to end the call
+            state["step"] = "done"
+            update_state(call_sid, state)
+            
+            logger.info("Customer cancelled from slot selection", extra={"call_sid": call_sid, "step": "choose_slot"})
+            
+            goodbye_text = (
+                f"No problem{name_phrase}. You can call us back anytime to schedule. "
+                "Thank you for calling Sears Home Services. Goodbye!"
+            )
+            say_obj = say_with_logging(goodbye_text, call_sid, "choose_slot")
+            response.append(say_obj)
+            response.hangup()
+        
+        else:
+            # Try to parse a slot selection using word-boundary matching
+            # IMPORTANT: "1" in text matches "15th" — must use word boundaries!
+            words = set(re.findall(r'\b\w+\b', text_lower))
+            chosen_index = None
+            
+            # Check for explicit "option N" first (highest priority)
+            option_match = re.search(r'option\s*(\d)', text_lower)
+            if option_match:
+                opt_num = int(option_match.group(1))
+                if 1 <= opt_num <= 3:
+                    chosen_index = opt_num - 1
+            
+            # Then check for standalone number words or digits
+            if chosen_index is None:
+                if words & {"1", "one", "first"}:
+                    chosen_index = 0
+                elif words & {"2", "two", "second"}:
+                    chosen_index = 1
+                elif words & {"3", "three", "third"}:
+                    chosen_index = 2
+            
+            # Try to match by date/day from the offered slots
+            # e.g. "February 15th" or "Sunday" should match the correct slot
+            if chosen_index is None and offered_slots:
+                for i, slot in enumerate(offered_slots):
+                    start = slot.get("start_time")
+                    if not start:
+                        continue
+                    day_name = start.strftime("%A").lower()    # "sunday"
+                    month_name = start.strftime("%B").lower()  # "february"
+                    day_num = str(start.day)                   # "15"
+                    
+                    # Match day name: "sunday", "monday" etc.
+                    if day_name in text_lower:
+                        chosen_index = i
+                        break
+                    # Match "february 15" or "15th" with month context
+                    if month_name in text_lower and re.search(rf'\b{day_num}(th|st|nd|rd)?\b', text_lower):
+                        chosen_index = i
+                        break
+                    # Match just "15th" / "15" if only one slot has that day
+                    if re.search(rf'\b{day_num}(th|st|nd|rd)?\b', text_lower):
+                        chosen_index = i
+                        break
+            
+            logger.debug(f"Chosen index: {chosen_index}, Slots available: {len(offered_slots)}", extra={"call_sid": call_sid, "step": "choose_slot"})
+            
+            if chosen_index is not None and chosen_index < len(offered_slots) and len(offered_slots) > 0:
+                chosen_slot = offered_slots[chosen_index]
+                customer_phone = state.get("customer_phone", "")
+                
+                try:
+                    appt_info = book_appointment(
+                        call_sid=call_sid,
+                        customer_phone=customer_phone,
+                        zip_code=state.get("zip_code"),
+                        appliance_type=state.get("appliance_type"),
+                        symptom_summary=state.get("symptom_summary", ""),
+                        error_codes=state.get("error_codes", []),
+                        is_urgent=state.get("is_urgent", False),
+                        chosen_slot_id=chosen_slot["slot_id"]
+                    )
+                    
+                    state["step"] = "done"
+                    state["appointment_booked"] = True
+                    state["appointment_id"] = appt_info["id"]
+                    update_state(call_sid, state)
+                    
+                    logger.info(f"Appointment booked: ID={appt_info['id']}", extra={"call_sid": call_sid, "step": "choose_slot"})
+                    
+                    start = appt_info["start_time"]
+                    day_name = start.strftime("%A")
+                    date_str = start.strftime("%B %d")
+                    hour = start.hour
+                    if hour < 12:
+                        time_str = f"{hour} AM" if hour > 0 else "12 AM"
+                    else:
+                        hour_12 = hour - 12 if hour > 12 else hour
+                        time_str = f"{hour_12} PM" if hour_12 > 0 else "12 PM"
+                    
+                    confirmation_text = (
+                        f"Your appointment is confirmed for {day_name}, {date_str} at {time_str} "
+                        f"with technician {appt_info['technician_name']}. "
+                        "You will receive a confirmation text shortly. "
+                        "Thank you for calling Sears Home Services. Goodbye."
+                    )
+                    say_obj = say_with_logging(confirmation_text, call_sid, "choose_slot")
+                    response.append(say_obj)
+                    response.hangup()
+                    
+                except Exception as e:
+                    log_error(call_sid, e, step="choose_slot", context="Booking failed")
+                    state["step"] = "done"
+                    update_state(call_sid, state)
+                    
+                    error_text = (
+                        "I'm sorry, there was an error booking your appointment. "
+                        "Please call back or visit our website to schedule. "
+                        "Thank you for calling Sears Home Services. Goodbye."
+                    )
+                    say_obj = say_with_logging(error_text, call_sid, "choose_slot")
+                    response.append(say_obj)
+                    response.hangup()
+            else:
+                if len(offered_slots) == 0:
+                    logger.error("No slots available in state!", extra={"call_sid": call_sid, "step": "choose_slot"})
+                    slots = find_available_slots(
+                        zip_code=state.get("zip_code"),
+                        appliance_type=state.get("appliance_type"),
+                        time_preference=state.get("time_preference"),
+                        limit=3
+                    )
+                    if slots:
+                        state["offered_slots"] = slots
+                        update_state(call_sid, state)
+                
+                gather = _build_gather(response, continue_url, timeout=8, speech_timeout="3")
+                retry_text = (
+                    "I didn't catch your selection. "
+                    "Please say option 1, option 2, or option 3. "
+                    "Or say troubleshoot if you'd like to try fixing it yourself, "
+                    "or cancel if you'd like to end the call."
+                )
+                say_obj = say_with_logging(retry_text, call_sid, "choose_slot")
+                gather.append(say_obj)
+                response.redirect(continue_url)
     
     else:
         response.append(create_ssml_say(
