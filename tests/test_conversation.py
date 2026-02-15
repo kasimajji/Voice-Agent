@@ -1,15 +1,12 @@
-"""Tests for app.conversation module — state management and troubleshooting logic."""
+"""Tests for app.conversation module — state management and appliance inference."""
 import pytest
 from app.conversation import (
     _get_initial_state,
     _serialize_state,
     _deserialize_state,
     infer_appliance_type,
-    get_troubleshooting_steps_summary,
-    get_next_troubleshooting_prompt,
-    is_positive_response,
-    BASIC_TROUBLESHOOTING,
 )
+from app.llm import llm_interpret_troubleshooting_response
 from datetime import datetime
 
 
@@ -106,76 +103,39 @@ class TestInferApplianceType:
         assert infer_appliance_type("") is None
 
 
-# ── Troubleshooting Steps Summary ──────────────────────────────────────
+# ── Troubleshooting Response Interpretation (keyword fallback) ────────
 
-class TestTroubleshootingStepsSummary:
-    def test_known_appliance_returns_steps(self):
-        summary = get_troubleshooting_steps_summary("washer")
-        assert "Step 1:" in summary
-        assert "Step 2:" in summary
-        assert "Step 3:" in summary
-
-    def test_unknown_appliance_returns_empty(self):
-        assert get_troubleshooting_steps_summary("toaster") == ""
-
-    def test_empty_appliance_returns_empty(self):
-        assert get_troubleshooting_steps_summary("") == ""
-
-    def test_none_appliance_returns_empty(self):
-        assert get_troubleshooting_steps_summary(None) == ""
-
-    def test_all_appliances_have_steps(self):
-        for appliance in BASIC_TROUBLESHOOTING:
-            summary = get_troubleshooting_steps_summary(appliance)
-            assert len(summary) > 0, f"No summary for {appliance}"
-
-    def test_please_prefix_removed(self):
-        summary = get_troubleshooting_steps_summary("washer")
-        assert "Please check" not in summary
-        assert "Check" in summary
-
-
-# ── get_next_troubleshooting_prompt ────────────────────────────────────
-
-class TestGetNextTroubleshootingPrompt:
-    def test_returns_first_step(self):
-        state = {"appliance_type": "washer", "troubleshooting_step": 0}
-        prompt = get_next_troubleshooting_prompt(state)
-        assert prompt is not None
-        assert state["troubleshooting_step"] == 1
-
-    def test_returns_none_after_all_steps(self):
-        state = {"appliance_type": "washer", "troubleshooting_step": 100}
-        prompt = get_next_troubleshooting_prompt(state)
-        assert prompt is None
-
-    def test_unknown_appliance_returns_none(self):
-        state = {"appliance_type": "toaster", "troubleshooting_step": 0}
-        assert get_next_troubleshooting_prompt(state) is None
-
-
-# ── Positive Response Detection ────────────────────────────────────────
-
-class TestIsPositiveResponse:
-    @pytest.mark.parametrize("text", [
-        "yes", "yeah", "yep", "ok", "sure", "absolutely",
-        "it worked", "that worked", "fixed", "working now",
-        "that helped", "all good", "problem solved",
-    ])
-    def test_positive_responses(self, text):
-        assert is_positive_response(text) is True
+class TestTroubleshootingResponseInterpretation:
+    """Tests the keyword fallback of llm_interpret_troubleshooting_response
+    (used when LLM model is None, e.g. in test environments)."""
 
     @pytest.mark.parametrize("text", [
-        "no", "nope", "not working", "didn't work", "still broken",
-        "same problem", "no change", "negative", "unfortunately",
-        "didn't help", "doesn't work", "still not working",
+        "no it didn't work",
+        "still not working",
+        "nope, same issue",
+        "didn't help at all",
+        "no change",
+        "I checked it but nothing happened",
+        "I tried that already",
     ])
-    def test_negative_responses(self, text):
-        assert is_positive_response(text) is False
+    def test_negative_responses_not_resolved(self, text):
+        result = llm_interpret_troubleshooting_response(text, "Check the power cord")
+        assert result["is_resolved"] is False
 
-    def test_ambiguous_good_with_negation(self):
-        # "The dial is good, it's at max cooling" — issue persists
-        assert is_positive_response("not working but the dial is good") is False
+    @pytest.mark.parametrize("text", [
+        "yes that fixed it",
+        "it worked! it's working now",
+        "that helped, all good",
+        "problem solved",
+    ])
+    def test_positive_responses_resolved(self, text):
+        result = llm_interpret_troubleshooting_response(text, "Check the power cord")
+        assert result["is_resolved"] is True
 
-    def test_empty_string(self):
-        assert is_positive_response("") is False
+    def test_ambiguous_defaults_to_not_resolved(self):
+        result = llm_interpret_troubleshooting_response("hmm I'm not sure", "Check the power cord")
+        assert result["is_resolved"] is False
+
+    def test_empty_input(self):
+        result = llm_interpret_troubleshooting_response("", "Check the power cord")
+        assert result["is_resolved"] is False

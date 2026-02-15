@@ -178,35 +178,54 @@ def llm_interpret_troubleshooting_response(speech_text: str, troubleshooting_ste
         return {"is_resolved": False, "confidence": "low", "interpretation": "No response"}
     
     if not model:
-        # Fallback: simple keyword matching
+        # Fallback: keyword matching — default to NOT resolved unless explicitly positive
         text_lower = speech_text.lower()
-        positive_words = ["yes", "yeah", "fixed", "working", "resolved", "good now", "helped"]
-        negative_words = ["no", "still", "not working", "same issue", "didn't help", "worse"]
         
-        has_positive = any(word in text_lower for word in positive_words)
-        has_negative = any(word in text_lower for word in negative_words)
-        
-        if has_negative:
-            return {"is_resolved": False, "confidence": "medium", "interpretation": speech_text}
-        elif has_positive:
+        # Check RESOLVED phrases first — these are specific and take priority
+        resolved_phrases = [
+            "fixed", "that worked", "it worked", "working now", "all good",
+            "problem solved", "resolved", "that helped", "it's working",
+        ]
+        if any(phrase in text_lower for phrase in resolved_phrases):
             return {"is_resolved": True, "confidence": "medium", "interpretation": speech_text}
-        else:
-            return {"is_resolved": False, "confidence": "low", "interpretation": speech_text}
+        
+        # Then check negative patterns — broader, so checked second
+        negative_phrases = [
+            "not working", "same issue", "didn't help", "didn't work", "worse",
+            "no change", "nothing changed", "same problem", "still broken",
+            "doesn't work", "doesn't help", "still not", "won't work",
+            "no luck", "not fixed",
+        ]
+        negative_words = ["no", "nope", "didn't", "doesn't", "checked", "tried", "already"]
+        
+        if any(phrase in text_lower for phrase in negative_phrases):
+            return {"is_resolved": False, "confidence": "medium", "interpretation": speech_text}
+        # For single words, check as whole words to avoid substring false matches
+        words_set = set(text_lower.split())
+        if any(w in words_set for w in negative_words):
+            return {"is_resolved": False, "confidence": "medium", "interpretation": speech_text}
+        
+        return {"is_resolved": False, "confidence": "low", "interpretation": speech_text}
     
     try:
         prompt = (
             "You are helping interpret a customer's response during appliance troubleshooting.\n\n"
             f'Troubleshooting step given: "{troubleshooting_step}"\n\n'
             f'Customer\'s response: "{speech_text}"\n\n'
-            "Analyze the response and determine:\n"
-            "1. Is the issue RESOLVED (fixed/working) or PERSISTS (still broken/not working)?\n"
-            "2. What did the customer actually mean?\n\n"
-            "IMPORTANT: Look for context clues:\n"
-            '- "I checked it, it\'s at max cooling" means they checked but issue PERSISTS (not cooling despite max setting)\n'
-            '- "It\'s good" could mean either fixed OR already checked (use context)\n'
-            '- "Still having the issue" clearly means PERSISTS\n'
-            '- "That worked!" clearly means RESOLVED\n'
-            '- "No change" means PERSISTS\n\n'
+            "Determine if the appliance issue is RESOLVED or still PERSISTS.\n\n"
+            "CRITICAL RULES — read carefully:\n"
+            "- Default to is_resolved: false UNLESS the customer EXPLICITLY says the problem is fixed.\n"
+            "- The customer must use clear resolution language like 'that fixed it', 'it's working now',\n"
+            "  'problem solved', 'yes that helped', 'all good now' for is_resolved to be true.\n"
+            "- If the customer just says they checked something or tried a step, that does NOT mean resolved.\n"
+            "  Checking a step ≠ problem fixed. They are reporting what they found.\n"
+            "- 'It didn't work', 'no', 'still the same', 'not working', 'no change', 'nope',\n"
+            "  'didn't help', 'same problem' → is_resolved: false, confidence: high\n"
+            "- 'I checked it', 'I tried that', 'I looked at it', 'it's already set correctly',\n"
+            "  'the setting is fine', 'it's plugged in' → is_resolved: false, confidence: high\n"
+            "  (These mean the customer tried the step but the problem STILL EXISTS)\n"
+            "- 'I don't know', ambiguous, or unrelated → is_resolved: false, confidence: low\n"
+            "- ONLY mark is_resolved: true when customer EXPLICITLY confirms the fix worked.\n\n"
             "Respond in JSON format:\n"
             '{\n'
             '  "is_resolved": true/false,\n'
@@ -214,14 +233,20 @@ def llm_interpret_troubleshooting_response(speech_text: str, troubleshooting_ste
             '  "interpretation": "brief explanation of what customer meant"\n'
             '}\n\n'
             "Examples:\n\n"
-            'Input: "No, still having an issue"\n'
-            'Output: {"is_resolved": false, "confidence": "high", "interpretation": "Issue persists"}\n\n'
-            'Input: "I checked the dial, it\'s at max cooling"\n'
-            'Output: {"is_resolved": false, "confidence": "high", "interpretation": "Customer confirmed setting is correct but issue persists"}\n\n'
-            'Input: "Yes, that fixed it!"\n'
-            'Output: {"is_resolved": true, "confidence": "high", "interpretation": "Issue is resolved"}\n\n'
-            'Input: "The door is good"\n'
-            'Output: {"is_resolved": false, "confidence": "medium", "interpretation": "Door seal is fine but issue persists"}\n\n'
+            'Input: "No, it didn\'t work"\n'
+            'Output: {"is_resolved": false, "confidence": "high", "interpretation": "Customer says troubleshooting did not help"}\n\n'
+            'Input: "I checked the dial, it\'s already at max cooling"\n'
+            'Output: {"is_resolved": false, "confidence": "high", "interpretation": "Setting was already correct, issue persists"}\n\n'
+            'Input: "I tried all three steps but nothing changed"\n'
+            'Output: {"is_resolved": false, "confidence": "high", "interpretation": "All steps tried, issue persists"}\n\n'
+            'Input: "Nope, still not cooling"\n'
+            'Output: {"is_resolved": false, "confidence": "high", "interpretation": "Issue persists after troubleshooting"}\n\n'
+            'Input: "The door seems fine"\n'
+            'Output: {"is_resolved": false, "confidence": "high", "interpretation": "Door is OK but overall issue persists"}\n\n'
+            'Input: "Yes, that fixed it! It\'s working now!"\n'
+            'Output: {"is_resolved": true, "confidence": "high", "interpretation": "Customer confirms issue is resolved"}\n\n'
+            'Input: "Oh wow, it started working again!"\n'
+            'Output: {"is_resolved": true, "confidence": "high", "interpretation": "Appliance is working after troubleshooting"}\n\n'
             "Now analyze:"
         )
 
@@ -984,16 +1009,26 @@ def llm_plan_next_step(user_text: str, state: dict) -> str:
 
     # Cross-cutting exit: use LLM to detect "call back later" / goodbye intent
     # Only check if there's actual speech and we're not already at a terminal step
-    if text and current_step != "done" and model:
+    # Skip exit detection for steps where "no" or "call back" is a valid in-step response
+    skip_exit_steps = {
+        "confirm_email", "confirm_zip", "confirm_resolution",
+        "choose_slot", "greet_ask_name",
+    }
+    if text and current_step != "done" and current_step not in skip_exit_steps and model:
         try:
-            prompt = f"""Is the caller trying to end the call or say goodbye?
+            prompt = f"""Is the caller CLEARLY trying to end the entire phone call?
 
+Current conversation step: {current_step}
 Caller said: "{text}"
 
 Rules:
-- "yes" if they want to end the call (goodbye, call back later, not now, another time, hang up, I'm done)
-- "no" if they are answering a question or continuing the conversation
-- When in doubt, say "no"
+- "yes" ONLY if the caller's PRIMARY intent is to end the call entirely
+  (e.g., "goodbye", "I'll call back another time", "I don't need help anymore", "hang up")
+- "no" if they are answering a question, describing a problem, making a choice,
+  saying "no" to a specific question, or continuing the conversation in any way
+- "no" if they say "no" followed by something else (they're responding to a question)
+- "no" if they mention scheduling, troubleshooting, photos, or any service topic
+- When in doubt, ALWAYS say "no" — let the step handler deal with it
 
 Return ONLY "yes" or "no":"""
             result = model.generate_content(
@@ -1566,16 +1601,27 @@ def llm_extract_symptoms(user_text: str) -> dict:
         return fallback
     
     try:
-        prompt = f"""You are a home appliance service assistant.
-From the caller's description, extract structured information.
+        prompt = f"""You are a friendly phone agent for a home appliance repair company.
+The customer just described their appliance problem. Summarize it in a way you can
+speak back to them naturally on the phone.
 
 Always respond in valid JSON with exactly these keys:
-- "symptom_summary": string (a concise 1-2 sentence summary of the problem)
-- "error_codes": list of strings (error codes like "E23", "F21", etc.)
-- "is_urgent": boolean (true if safety issue, flooding, fire risk, gas smell, etc.)
-
-If there are no obvious error codes, use an empty list for "error_codes".
-If it does not sound urgent, use false for "is_urgent".
+- "symptom_summary": string — a SHORT natural sentence you will say back to the customer.
+  MUST be written in 2nd person ("your refrigerator...", "it sounds like your washer...").
+  NEVER use 3rd person like "The customer reported", "The caller described", "The user said".
+  NEVER include meta-commentary like "no error codes mentioned" or "no specific symptoms".
+  Keep it to ONE short sentence, max 15 words.
+  Examples of GOOD summaries:
+    "Your refrigerator isn't cooling properly"
+    "Your washer is leaking water during the spin cycle"
+    "Your dryer isn't heating up"
+    "Your dishwasher won't start"
+  Examples of BAD summaries (NEVER do this):
+    "The customer reported that their refrigerator is not cooling"
+    "Caller describes a leaking washer with no error codes"
+    "The user's dryer is not heating. No error codes were mentioned."
+- "error_codes": list of strings (error codes like "E23", "F21", etc. — empty list if none)
+- "is_urgent": boolean (true ONLY if safety issue: flooding, fire risk, gas smell, sparking)
 
 Caller description:
 {user_text}"""

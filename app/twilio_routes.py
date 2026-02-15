@@ -15,7 +15,6 @@ from .conversation import (
     get_state,
     update_state,
     infer_appliance_type,
-    get_troubleshooting_steps_summary,
 )
 from .llm import (
     llm_classify_appliance,
@@ -572,7 +571,19 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
         elif appliance and has_full_description:
             # Extract structured symptoms
             extracted = llm_extract_symptoms(speech_result)
-            state["symptom_summary"] = extracted.get("symptom_summary") or symptoms or speech_result
+            summary = extracted.get("symptom_summary") or symptoms or speech_result
+            # Filter out 3rd-person meta-text from LLM
+            summary_lower = summary.lower()
+            meta_patterns = [
+                "the caller", "the customer", "the user",
+                "customer reported", "caller described", "user said",
+                "customer's ", "caller's ", "user's ",
+                "no error codes", "no specific", "no further",
+                "reported that", "describes a", "mentioned that",
+            ]
+            if any(p in summary_lower for p in meta_patterns):
+                summary = f"Your {appliance} is not working properly"
+            state["symptom_summary"] = summary
             state["error_codes"] = extracted.get("error_codes") or []
             state["is_urgent"] = bool(extracted.get("is_urgent"))
             state["step"] = "offer_troubleshoot_or_schedule"
@@ -582,8 +593,7 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             
             gather = _build_gather(response, continue_url, timeout=8, speech_timeout="3")
             gather.append(create_ssml_say(
-                f"Got it{name_phrase}, I understand you're having trouble with your {appliance}. "
-                f"{state['symptom_summary']}. "
+                f"Got it{name_phrase}. {summary}. "
                 "Would you like me to walk you through a few quick troubleshooting steps, "
                 "or would you prefer to schedule a technician right away?"
             ))
@@ -735,9 +745,6 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             symptom = state.get("symptom_summary", "")
             # Use LLM to generate context-aware troubleshooting steps
             steps_summary = llm_generate_troubleshooting_steps(appliance, symptom)
-            if not steps_summary:
-                # Fallback to static steps if LLM fails
-                steps_summary = get_troubleshooting_steps_summary(appliance)
             state["troubleshooting_steps_text"] = steps_summary
             update_state(call_sid, state)
             
@@ -790,9 +797,9 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             return Response(content=str(response), media_type="application/xml")
 
         if intent_choice == "unsure" and intent_conf >= 0.6:
+            appliance = state.get('appliance_type', 'appliance')
             state["symptom_summary"] = (
-                f"Customer reported an issue with {state.get('appliance_type', 'the appliance')} "
-                "but could not provide specific symptoms."
+                f"Your {appliance} is not working properly"
             )
             state["error_codes"] = []
             state["is_urgent"] = False
@@ -812,13 +819,17 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             extracted = llm_extract_symptoms(speech_result)
             summary = extracted.get("symptom_summary") or speech_result
             # Avoid speaking awkward meta-text back to the customer.
-            meta_prefixes = [
+            summary_lower = summary.lower()
+            meta_patterns = [
                 "the caller", "the customer", "the user",
+                "customer reported", "caller described", "user said",
+                "customer's ", "caller's ", "user's ",
                 "no error codes", "no specific", "no further",
+                "reported that", "describes a", "mentioned that",
             ]
-            if any(summary.lower().startswith(p) for p in meta_prefixes):
+            if any(p in summary_lower for p in meta_patterns):
                 appliance = state.get('appliance_type', 'appliance')
-                summary = f"Your {appliance} is not working properly."
+                summary = f"Your {appliance} is not working properly"
             state["symptom_summary"] = summary
             state["error_codes"] = extracted.get("error_codes") or []
             state["is_urgent"] = bool(extracted.get("is_urgent"))
@@ -874,7 +885,14 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
             interpretation = llm_interpret_troubleshooting_response(speech_result, ts_steps_text)
             logger.debug(f"Troubleshoot interpretation: {interpretation}", extra={"call_sid": call_sid})
             
-            if interpretation.get("is_resolved") and interpretation.get("confidence") != "low":
+            # ONLY treat as resolved if customer EXPLICITLY confirmed the fix worked
+            # with HIGH confidence. "I checked it" or "I tried that" is NOT resolved.
+            explicitly_resolved = (
+                interpretation.get("is_resolved") is True
+                and interpretation.get("confidence") == "high"
+            )
+            
+            if explicitly_resolved:
                 state["resolved"] = True
                 state["step"] = "done"
                 update_state(call_sid, state)
@@ -891,11 +909,13 @@ async def _handle_voice_continue(call_sid: str, speech_result: str, state: dict,
                 response.hangup()
                 return Response(content=str(response), media_type="application/xml")
             
-            # Use LLM to classify next action intent
+            # Customer did NOT explicitly confirm resolution — classify next action
+            # Use LLM to determine what the customer wants to do next
             next_intent = llm_classify_user_intent(
                 speech_result,
                 choices=["schedule", "photo", "resolved", "not_resolved"],
-                context="Customer tried troubleshooting steps. Agent asked if they helped."
+                context="Customer tried troubleshooting steps and reported the result. "
+                        "They did NOT say the problem is fixed. What do they want to do next?"
             )
             next_choice = next_intent.get("choice", "unclear")
             
